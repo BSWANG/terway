@@ -502,7 +502,7 @@ func (e *ecsImpl) GetInstanceMaxENI(instanceID string) (int, error) {
 			})
 			metric.OpenAPILatency.WithLabelValues("DescribeInstanceTypesNew", fmt.Sprint(err != nil)).Observe(metric.MsSince(start))
 
-			if err != nil {
+			if err != nil || len(instanceTypeItems) == 0 {
 				// failback to preload eni quota
 				if quota, ok := ecsEniMatix[insType.InstanceType]; ok {
 					eniCap = quota
