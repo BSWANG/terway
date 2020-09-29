@@ -906,4 +906,5 @@ var ecsEniMatix = map[string]int{
 	"ecs.i2v-c1m2d1024.xlarge":   2,
 	"ecs.i2v-c1m2d500.xlarge":    2,
 	"ecs.ddh6s.custom.c4m48":     3,
+	"ecs.ddh6s.custom.c4m64":     3,
 }
