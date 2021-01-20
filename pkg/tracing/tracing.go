@@ -33,6 +33,27 @@ type PodMapping struct {
 	RemoteResID  string
 }
 
+type PodMappings []*PodMapping
+
+func (p PodMappings) Len() int {
+	return len(p)
+}
+
+func (p PodMappings) Less(i, j int) bool {
+	// simple sort keep idle res at bottom
+	if p[i].Name > p[j].Name {
+		return true
+	}
+	if p[i].RemoteResID < p[j].RemoteResID {
+		return true
+	}
+	return false
+}
+
+func (p PodMappings) Swap(i, j int) {
+	p[i], p[j] = p[j], p[i]
+}
+
 var (
 	defaultTracer Tracer
 )
@@ -60,6 +81,22 @@ type ResourcePoolStats interface {
 	GetRemote() map[string]types.Res
 }
 
+// FakeResourcePoolStats for test
+type FakeResourcePoolStats struct {
+	Local  map[string]types.Res
+	Remote map[string]types.Res
+}
+
+// GetLocal GetLocal
+func (f *FakeResourcePoolStats) GetLocal() map[string]types.Res {
+	return f.Local
+}
+
+// GetRemote GetRemote
+func (f *FakeResourcePoolStats) GetRemote() map[string]types.Res {
+	return f.Remote
+}
+
 // ResourceMappingHandler get resource mapping
 type ResourceMappingHandler interface {
 	GetResourceMapping() (ResourcePoolStats, error)
@@ -67,7 +104,7 @@ type ResourceMappingHandler interface {
 
 // ResMapping ResMapping
 type ResMapping interface {
-	GetResourceMapping() ([]PodMapping, error)
+	GetResourceMapping() (PodMappings, error)
 }
 
 // PodEventRecorder records event on pod
@@ -240,7 +277,7 @@ func (t *Tracer) RecordNodeEvent(eventType, reason, message string) error {
 
 // GetResourceMapping gives the resource mapping from the handler
 // if the handler has not been registered, there will be error
-func (t *Tracer) GetResourceMapping() ([]PodMapping, error) {
+func (t *Tracer) GetResourceMapping() (PodMappings, error) {
 	if t.resourceMapping == nil {
 		return nil, errors.New("no resource mapping handler registered")
 	}
