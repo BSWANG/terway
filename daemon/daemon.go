@@ -7,7 +7,6 @@ import (
 	"io/ioutil"
 	"net"
 	"os"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -937,8 +936,7 @@ func toResMapping(poolStats tracing.ResourcePoolStats, pods []interface{}) (trac
 		}
 		mapping = append(mapping, res)
 	}
-
-	sort.Sort(mapping)
+	//sort.Stable(mapping)
 	return mapping, nil
 }
 
