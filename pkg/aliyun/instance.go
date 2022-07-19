@@ -113,7 +113,12 @@ func UpdateFromAPI(client *ecs.Client, instanceType string) error {
 	}
 	var innerErr error
 	var resp *ecs.DescribeInstanceTypesResponse
-	err := wait.ExponentialBackoff(eniOpBackoff,
+	err := wait.ExponentialBackoff(wait.Backoff{
+		Duration: time.Second * 1,
+		Factor:   1,
+		Jitter:   0.3,
+		Steps:    3,
+	},
 		func() (done bool, err error) {
 			start := time.Now()
 			resp, innerErr = client.DescribeInstanceTypes(req)
@@ -163,3 +168,4 @@ func GetLimit(instanceType string) (limit Limits, ok bool) {
 	limits.RUnlock()
 	return
 }
+

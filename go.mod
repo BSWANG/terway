@@ -15,6 +15,7 @@ require (
 	github.com/docker/go-units v0.4.0 // indirect
 	github.com/evanphx/json-patch v4.9.0+incompatible
 	github.com/gorilla/mux v1.8.0 // indirect
+	github.com/hashicorp/go-retryablehttp v0.7.1
 	github.com/moby/term v0.0.0-20201216013528-df9cb8a40635 // indirect
 	github.com/morikuni/aec v1.0.0 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect

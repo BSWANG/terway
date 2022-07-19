@@ -3,6 +3,7 @@ package aliyun
 import (
 	"errors"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -22,11 +23,15 @@ var (
 )
 
 func clientCfg() *sdk.Config {
+	scheme := "HTTPS"
+	if os.Getenv("ALICLOUD_CLIENT_SCHEME") == "HTTP" {
+		scheme = "HTTP"
+	}
 	return &sdk.Config{
 		Timeout:   20 * time.Second,
 		Transport: http.DefaultTransport,
 		UserAgent: kubernetesAlicloudIdentity,
-		Scheme:    "HTTPS",
+		Scheme:    scheme,
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/hashicorp/go-retryablehttp"
 	"io/ioutil"
 	"net"
 	"net/http"
@@ -37,6 +38,13 @@ const (
 	vpcIDPath              = "vpc-id"
 )
 
+var retryClient *retryablehttp.Client
+
+func init() {
+	retryClient = retryablehttp.NewClient()
+	retryClient.Logger = nil
+}
+
 func getValue(url string) (string, error) {
 	if !strings.HasPrefix(url, metadataBase) {
 		url = metadataBase + url
@@ -48,7 +56,7 @@ func getValue(url string) (string, error) {
 	defer func() {
 		metric.MetadataLatency.WithLabelValues(url, fmt.Sprint(err != nil)).Observe(metric.MsSince(start))
 	}()
-	resp, err := http.DefaultClient.Get(url)
+	resp, err := retryClient.Get(url)
 	if err != nil {
 		return "", err
 	}
@@ -82,7 +90,7 @@ func getArray(url string) ([]string, error) {
 		metric.MetadataLatency.WithLabelValues(url, fmt.Sprint(err != nil)).Observe(metric.MsSince(start))
 	}()
 
-	resp, err := http.DefaultClient.Get(url)
+	resp, err := retryClient.Get(url)
 	if err != nil {
 		return []string{}, err
 	}
