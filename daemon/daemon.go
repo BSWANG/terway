@@ -541,7 +541,7 @@ func (n *networkService) gcPods(ctx context.Context) error {
 	existIPs := sets.Set[string]{}
 
 	for _, pod := range pods {
-		if !pod.SandboxExited {
+		if !pod.SandboxExited && !pod.PodENI {
 			exist[utils.PodInfoKey(pod.Namespace, pod.Name)] = true
 			if pod.PodIPs.IPv4 != nil {
 				existIPs.Insert(pod.PodIPs.IPv4.String())
@@ -568,12 +568,12 @@ func (n *networkService) gcPods(ctx context.Context) error {
 		}
 		// check kube-api again
 		ok, err := n.k8s.PodExist(podRes.PodInfo.Namespace, podRes.PodInfo.Name)
-		if err != nil || ok {
+		if !podRes.PodInfo.PodENI && (err != nil || ok) {
 			continue
 		}
 
 		// that is old logic ... keep it
-		if podRes.PodInfo.IPStickTime != 0 {
+		if !podRes.PodInfo.PodENI && podRes.PodInfo.IPStickTime != 0 {
 			podRes.PodInfo.IPStickTime = 0
 
 			err = n.resourceDB.Put(podID, podRes)
@@ -583,6 +583,7 @@ func (n *networkService) gcPods(ctx context.Context) error {
 			continue
 		}
 
+		var gcRes int
 		for _, resource := range podRes.Resources {
 			res := parseNetworkResource(resource)
 			if res == nil {
@@ -599,13 +600,16 @@ func (n *networkService) gcPods(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
+			gcRes++
 		}
 
-		err = n.deletePodResource(podRes.PodInfo)
-		if err != nil {
-			return err
+		if gcRes == len(podRes.Resources) {
+			err = n.deletePodResource(podRes.PodInfo)
+			if err != nil {
+				return err
+			}
+			serviceLog.Info("removed pod", "pod", podID)
 		}
-		serviceLog.Info("removed pod", "pod", podID)
 	}
 
 	if os.Getenv("TERWAY_GC_RULES") == "true" {
