@@ -215,19 +215,6 @@ func (m *ReconcilePod) podCreate(ctx context.Context, pod *corev1.Pod) (reconcil
 
 	l.Info("creating eni")
 
-	if utils.ISLinJunNode(node.Labels) {
-		crNode := &v1beta1.Node{}
-		err = m.client.Get(ctx, k8stypes.NamespacedName{Name: node.Name}, crNode)
-		if err != nil {
-			return reconcile.Result{}, err
-		}
-		backend := aliyunClient.BackendAPIEFLO
-		if crNode.Annotations[types.ENOApi] == "hdeni" {
-			backend = aliyunClient.BackendAPIEFLOHDENI
-		}
-		ctx = aliyunClient.SetBackendAPI(ctx, backend)
-	}
-
 	podENI := &v1beta1.PodENI{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      pod.Name,
@@ -242,6 +229,23 @@ func (m *ReconcilePod) podCreate(ctx context.Context, pod *corev1.Pod) (reconcil
 				types.ENIRelatedNodeName: nodeInfo.NodeName,
 			},
 		},
+	}
+
+	if utils.ISLinJunNode(node.Labels) {
+		crNode := &v1beta1.Node{}
+		err = m.client.Get(ctx, k8stypes.NamespacedName{Name: node.Name}, crNode)
+		if err != nil {
+			return reconcile.Result{}, err
+		}
+		backend := aliyunClient.BackendAPIEFLO
+
+		switch crNode.Annotations[types.ENOApi] {
+		case types.APIEcsHDeni:
+			backend = aliyunClient.BackendAPIECS
+		case types.APIEnoHDeni:
+			backend = aliyunClient.BackendAPIEFLOHDENI
+		}
+		ctx = aliyunClient.SetBackendAPI(ctx, backend)
 	}
 
 	defer func() {

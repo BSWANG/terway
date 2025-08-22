@@ -693,6 +693,16 @@ func (m *ReconcilePodENI) attachENI(ctx context.Context, podENI *v1beta1.PodENI,
 	podENI.Status.ENIInfos = make(map[string]v1beta1.ENIInfo)
 	lock := sync.Mutex{}
 
+	crNode := &v1beta1.Node{}
+	err = m.client.Get(ctx, k8stypes.NamespacedName{Name: nodeName}, crNode)
+	if err != nil {
+		return err
+	}
+	ecsHighDensity := false
+	if crNode.Annotations[types.ENOApi] == types.APIEcsHDeni {
+		ecsHighDensity = true
+	}
+
 	g, _ := errgroup.WithContext(context.Background())
 	for i := range podENI.Spec.Allocations {
 		ii := i
@@ -705,10 +715,16 @@ func (m *ReconcilePodENI) attachENI(ctx context.Context, podENI *v1beta1.PodENI,
 				cardIndex = m.getENIIndex(ctx, podENI.Namespace, podENI.Name, alloc.ENI.ID)
 			}
 
+			trunkID := podENI.Status.TrunkENIID
+
+			if ecsHighDensity {
+				trunkID = "DenseModeTrunkEniId"
+			}
+
 			err = common.Attach(ctx, m.client, &common.AttachOption{
 				InstanceID:         podENI.Status.InstanceID,
 				NetworkInterfaceID: alloc.ENI.ID,
-				TrunkENIID:         podENI.Status.TrunkENIID,
+				TrunkENIID:         trunkID,
 				NetworkCardIndex:   cardIndex,
 				NodeName:           nodeName,
 			})
@@ -738,14 +754,24 @@ func (m *ReconcilePodENI) attachENI(ctx context.Context, podENI *v1beta1.PodENI,
 			alloc.IPv6 = eni.Spec.IPv6
 
 			podENI.Spec.Allocations[ii] = alloc
+
+			vid := eni.Status.ENIInfo.Vid
+			vfID := eni.Status.ENIInfo.VfID
+
+			if ecsHighDensity && vid > 0 { // ensure >0
+				vfID = ptr.To(uint32(vid))
+				vid = 0
+			}
+
 			podENI.Status.ENIInfos[alloc.ENI.ID] = v1beta1.ENIInfo{
 				ID:               eni.Name,
 				Type:             eni.Status.ENIInfo.Type,
-				Vid:              eni.Status.ENIInfo.Vid,
+				Vid:              vid,
 				Status:           v1beta1.ENIStatusBind,
 				NetworkCardIndex: cardIndex,
-				VfID:             eni.Status.ENIInfo.VfID,
+				VfID:             vfID,
 			}
+
 			lock.Unlock()
 
 			return nil

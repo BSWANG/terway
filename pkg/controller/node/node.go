@@ -405,7 +405,50 @@ func (r *ReconcileNode) handleEFLO(ctx context.Context, k8sNode *corev1.Node, no
 		node.Spec.NodeMetadata.RegionID = nodeInfo.RegionID
 
 		if node.Labels[types.LinJunNetworkWorkKey] == "eni" {
-			resp, err := r.aliyun.GetEFLOController().DescribeNode(ctx, node.Spec.NodeMetadata.InstanceID)
+			describeNodeReq := &aliyunClient.DescribeNodeRequestOptions{
+				NodeID: &node.Spec.NodeMetadata.InstanceID,
+			}
+
+			if types.NodeExclusiveENIMode(node.Labels) != types.ExclusiveENIOnly {
+				return reconcile.Result{}, fmt.Errorf("exclusive ENI mode must be enabled for EFLO nodes")
+			}
+
+			resp, err := r.aliyun.GetEFLOController().DescribeNode(ctx, describeNodeReq)
+			if err != nil {
+				return reconcile.Result{}, err
+			}
+
+			limit, err := aliyunClient.GetLimitProvider().GetLimit(r.aliyun.GetEFLOController(), resp.MachineType)
+			if err != nil {
+				return reconcile.Result{}, err
+			}
+
+			// this case use ecs api
+			node.Spec.NodeCap.Adapters = limit.Adapters
+			node.Spec.NodeCap.TotalAdapters = limit.Adapters
+			node.Spec.NodeCap.IPv4PerAdapter = limit.IPv4PerAdapter
+			if node.Annotations == nil {
+				node.Annotations = make(map[string]string)
+			}
+
+			if (node.Spec.NodeCap.Adapters <= 1 &&
+				limit.HighDenseQuantity > 0) ||
+				k8sNode.Annotations[types.ENOApi] == types.APIEcsHDeni { // check k8s config
+				node.Spec.NodeCap.Adapters = limit.HighDenseQuantity
+				node.Spec.NodeCap.TotalAdapters = limit.HighDenseQuantity
+
+				if node.Annotations[types.ENOApi] != "" && node.Annotations[types.ENOApi] != types.APIEcsHDeni {
+					return reconcile.Result{}, fmt.Errorf("cannot change ENOApi from %s to ecs", node.Annotations[types.ENOApi])
+				}
+
+				node.Annotations[types.ENOApi] = types.APIEcsHDeni
+			} else {
+				if node.Annotations[types.ENOApi] != "" && node.Annotations[types.ENOApi] != types.APIEcs {
+					return reconcile.Result{}, fmt.Errorf("cannot change ENOApi from %s to ecs", node.Annotations[types.ENOApi])
+				}
+				node.Annotations[types.ENOApi] = types.APIEcs
+			}
+
 		} else {
 			resp, err := r.aliyun.GetEFLO().GetNodeInfoForPod(ctx, node.Spec.NodeMetadata.InstanceID)
 			if err != nil {
