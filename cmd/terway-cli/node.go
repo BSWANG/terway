@@ -141,6 +141,15 @@ func setExclusiveMode(store nodecap.NodeCapabilitiesStore, labels map[string]str
 	if err != nil {
 		return err
 	}
+	// set the eno type
+	if labels[types.LinJunNodeLabelKey] == "true" {
+		if labels[types.LinJunNetworkWorkKey] == string(types.LinjunNetworkWorkENI) {
+			store.Set(nodecap.NodeCapabilityLinJunNetwork, string(types.LinjunNetworkWorkENI))
+		} else {
+			store.Set(nodecap.NodeCapabilityLinJunNetwork, string(types.LinjunNetworkWorkDefault))
+		}
+	}
+
 	now := types.NodeExclusiveENIMode(labels)
 
 	switch store.Get(nodecap.NodeCapabilityExclusiveENI) {

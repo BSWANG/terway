@@ -19,6 +19,7 @@ const (
 	NodeCapabilityNetworkPolicyProvider = "network_policy_provider"
 	NodeCapabilityHasCiliumChainer      = "has_cilium_chainer"
 	NodeCapabilityKubeProxyReplacement  = "kube_proxy_replacement"
+	NodeCapabilityLinJunNetwork         = "linjun_network"
 )
 
 // NodeCapabilitiesStore defines an interface for node capabilities operations

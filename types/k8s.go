@@ -67,8 +67,8 @@ const (
 
 const (
 	APIEcs      = "ecs"
-	APIEnoHDeni = "hdeni"
 	APIEcsHDeni = "ecs-hdeni"
+	APIEnoHDeni = "hdeni"
 )
 
 // labels
@@ -80,8 +80,6 @@ const (
 	ExclusiveENIModeLabel = LabelPrefix + "exclusive-mode-eni-type"
 
 	LinJunNodeLabelKey = "alibabacloud.com/lingjun-worker"
-
-	LinJunNetworkWorkKey = "alibabacloud.com/lingjun-vpc-network-type-override"
 )
 
 // FinalizerPodENI finalizer for podENI resource
@@ -181,3 +179,11 @@ func NodeExclusiveENIMode(labels map[string]string) ExclusiveENI {
 		return ExclusiveDefault
 	}
 }
+
+type LinjunNetworkWork string
+
+const (
+	LinjunNetworkWorkDefault = LinjunNetworkWork("")
+	LinjunNetworkWorkENO     = LinjunNetworkWork("eno")
+	LinjunNetworkWorkENI     = LinjunNetworkWork("eni")
+)

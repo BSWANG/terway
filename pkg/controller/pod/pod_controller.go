@@ -240,7 +240,7 @@ func (m *ReconcilePod) podCreate(ctx context.Context, pod *corev1.Pod) (reconcil
 		backend := aliyunClient.BackendAPIEFLO
 
 		switch crNode.Annotations[types.ENOApi] {
-		case types.APIEcsHDeni:
+		case types.APIEcsHDeni, types.APIEcs:
 			backend = aliyunClient.BackendAPIECS
 		case types.APIEnoHDeni:
 			backend = aliyunClient.BackendAPIEFLOHDENI
