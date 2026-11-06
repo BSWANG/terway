@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bingshen.wbs <bingshen.wbs@alibaba-inc.com>
+Date: Fri, 6 Nov 2026 17:00:00 +0800
+Subject: [PATCH] Use equivalent apimachinery name validation
+
+Apply to Calico v3.30.0 (572a32dd9b2f9784d66d74712d5ec2e703d25083).
+
+---
+diff --git a/goldmane/proto/methods.go b/goldmane/proto/methods.go
+index ab99279..c3c2faa 100644
+--- a/goldmane/proto/methods.go
++++ b/goldmane/proto/methods.go
+@@ -20,7 +20,7 @@ import (
+ 	"strings"
+ 
+ 	"github.com/sirupsen/logrus"
+-	"k8s.io/kubernetes/pkg/apis/core/validation"
++	"k8s.io/apimachinery/pkg/api/validation"
+ )
+ 
+ // NewFlow returns a new proto.Flow object with all fields initialized and non-nil.
+@@ -241,7 +241,7 @@ func HitFromString(s string) (*PolicyHit, error) {
+ 	if name == "" {
+ 		return nil, fmt.Errorf("invalid name: %s", namePart)
+ 	}
+-	if res := validation.ValidatePodName(name, true); res != nil {
++	if res := validation.NameIsDNSSubdomain(name, true); res != nil {
+ 		return nil, fmt.Errorf("invalid name: %s: %s", name, strings.Join(res, ", "))
+ 	}
+ 
+@@ -260,7 +260,7 @@ func HitFromString(s string) (*PolicyHit, error) {
+ 			// want to show this in the API as it's not a real v3 Tier.
+ 			tier = ""
+ 		} else {
+-			if res := validation.ValidatePodName(tier, true); res != nil {
++		if res := validation.NameIsDNSSubdomain(tier, true); res != nil {
+ 				return nil, fmt.Errorf("invalid tier: %s: %s", tier, strings.Join(res, ", "))
+ 			}
+ 		}
+-- 
+2.50.1
+

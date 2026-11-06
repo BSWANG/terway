@@ -1,0 +1,97 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bingshen.wbs <bingshen.wbs@alibaba-inc.com>
+Date: Fri, 6 Nov 2026 17:00:00 +0800
+Subject: [PATCH] Cover watch bookmark propagation
+
+Apply to Calico v3.30.0 (572a32dd9b2f9784d66d74712d5ec2e703d25083).
+
+---
+diff --git a/libcalico-go/lib/backend/k8s/resources/bookmark_test.go b/libcalico-go/lib/backend/k8s/resources/bookmark_test.go
+new file mode 100644
+index 0000000..e37209f
+--- /dev/null
++++ b/libcalico-go/lib/backend/k8s/resources/bookmark_test.go
+@@ -0,0 +1,80 @@
++package resources
++
++import (
++	"context"
++	"sync"
++	"testing"
++	"time"
++
++	log "github.com/sirupsen/logrus"
++	v1 "k8s.io/api/core/v1"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	kwatch "k8s.io/apimachinery/pkg/watch"
++
++	"github.com/projectcalico/calico/libcalico-go/lib/backend/api"
++	"github.com/projectcalico/calico/libcalico-go/lib/backend/model"
++)
++
++func TestWatchBookmarkOptions(t *testing.T) {
++	for _, enabled := range []bool{false, true} {
++		opts := watchOptionsToK8sListOptions(api.WatchOptions{Revision: "latest", AllowWatchBookmarks: enabled})
++		if opts.ResourceVersion != "latest" || !opts.Watch || opts.AllowWatchBookmarks != enabled {
++			t.Fatalf("unexpected watch options: %+v", opts)
++		}
++	}
++}
++
++func TestWatchBookmarkConversion(t *testing.T) {
++	c := k8sWatcherConverter{
++		logCxt: log.WithField("test", "bookmark"),
++		converter: func(Resource) ([]*model.KVPair, error) {
++			t.Fatal("a bookmark must not enter resource conversion")
++			return nil, nil
++		},
++	}
++	events := c.convertEvent(kwatch.Event{
++		Type:   kwatch.Bookmark,
++		Object: &v1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "latest"}},
++	})
++	if len(events) != 1 || events[0].Type != api.WatchBookmark || events[0].New.Revision != "latest" {
++		t.Fatalf("unexpected bookmark conversion: %+v", events)
++	}
++	if events[0].New.Key != nil || events[0].New.Value != nil {
++		t.Fatal("a bookmark must contain a revision only")
++	}
++}
++
++type bookmarkWatchStub struct {
++	results chan api.WatchEvent
++	once    sync.Once
++}
++
++func (w *bookmarkWatchStub) Stop()                             { w.once.Do(func() { close(w.results) }) }
++func (w *bookmarkWatchStub) ResultChan() <-chan api.WatchEvent { return w.results }
++func (w *bookmarkWatchStub) HasTerminated() bool               { return false }
++
++func TestProfileWatchBookmarkRevisions(t *testing.T) {
++	ns := &bookmarkWatchStub{results: make(chan api.WatchEvent, 1)}
++	sa := &bookmarkWatchStub{results: make(chan api.WatchEvent, 1)}
++	w := newProfileWatcher(context.Background(), ns, sa)
++	defer w.Stop()
++	for _, step := range []struct {
++		source   *bookmarkWatchStub
++		revision string
++		want     string
++	}{
++		{ns, "ns1", "ns1/"},
++		{sa, "sa1", "ns1/sa1"},
++		{ns, "ns2", "ns2/sa1"},
++	} {
++		step.source.results <- api.WatchEvent{Type: api.WatchBookmark, New: &model.KVPair{Revision: step.revision}}
++		select {
++		case event := <-w.ResultChan():
++			if event.Type != api.WatchBookmark || event.New.Revision != step.want || event.New.Value != nil {
++				t.Fatalf("unexpected profile bookmark: %+v; want revision %s", event, step.want)
++			}
++		case <-time.After(3 * time.Second):
++			t.Fatal("profile bookmark was not forwarded")
++		}
++	}
++}
+-- 
+2.50.1
+

@@ -1,0 +1,74 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bingshen.wbs <bingshen.wbs@alibaba-inc.com>
+Date: Fri, 6 Nov 2026 17:00:00 +0800
+Subject: [PATCH] Preserve the existing Terway resource subscriptions
+
+Apply to Calico v3.30.0 (572a32dd9b2f9784d66d74712d5ec2e703d25083).
+
+---
+diff --git a/libcalico-go/lib/backend/syncersv1/felixsyncer/felixsyncerv1.go b/libcalico-go/lib/backend/syncersv1/felixsyncer/felixsyncerv1.go
+index 67dbdbf..2de3715 100644
+--- a/libcalico-go/lib/backend/syncersv1/felixsyncer/felixsyncerv1.go
++++ b/libcalico-go/lib/backend/syncersv1/felixsyncer/felixsyncerv1.go
+@@ -46,10 +46,6 @@ func New(client api.Client, cfg apiconfig.CalicoAPIConfigSpec, callbacks api.Syn
+ 				ListInterface:   model.ResourceListOptions{Kind: apiv3.KindGlobalNetworkPolicy},
+ 				UpdateProcessor: updateprocessors.NewGlobalNetworkPolicyUpdateProcessor(),
+ 			},
+-			{
+-				ListInterface:   model.ResourceListOptions{Kind: apiv3.KindStagedGlobalNetworkPolicy},
+-				UpdateProcessor: updateprocessors.NewStagedGlobalNetworkPolicyUpdateProcessor(),
+-			},
+ 			{
+ 				ListInterface:   model.ResourceListOptions{Kind: apiv3.KindGlobalNetworkSet},
+ 				UpdateProcessor: updateprocessors.NewGlobalNetworkSetUpdateProcessor(),
+@@ -74,22 +70,10 @@ func New(client api.Client, cfg apiconfig.CalicoAPIConfigSpec, callbacks api.Syn
+ 				ListInterface:   model.ResourceListOptions{Kind: apiv3.KindNetworkPolicy},
+ 				UpdateProcessor: updateprocessors.NewNetworkPolicyUpdateProcessor(),
+ 			},
+-			{
+-				ListInterface:   model.ResourceListOptions{Kind: apiv3.KindStagedNetworkPolicy},
+-				UpdateProcessor: updateprocessors.NewStagedNetworkPolicyUpdateProcessor(),
+-			},
+-			{
+-				ListInterface:   model.ResourceListOptions{Kind: apiv3.KindStagedKubernetesNetworkPolicy},
+-				UpdateProcessor: updateprocessors.NewStagedKubernetesNetworkPolicyUpdateProcessor(),
+-			},
+ 			{
+ 				ListInterface:   model.ResourceListOptions{Kind: apiv3.KindNetworkSet},
+ 				UpdateProcessor: updateprocessors.NewNetworkSetUpdateProcessor(),
+ 			},
+-			{
+-				ListInterface:   model.ResourceListOptions{Kind: apiv3.KindTier},
+-				UpdateProcessor: updateprocessors.NewTierUpdateProcessor(),
+-			},
+ 			{
+ 				ListInterface:   model.ResourceListOptions{Kind: apiv3.KindHostEndpoint},
+ 				UpdateProcessor: updateprocessors.NewHostEndpointUpdateProcessor(),
+@@ -97,9 +81,6 @@ func New(client api.Client, cfg apiconfig.CalicoAPIConfigSpec, callbacks api.Syn
+ 			{
+ 				ListInterface: model.ResourceListOptions{Kind: apiv3.KindBGPConfiguration},
+ 			},
+-			{
+-				ListInterface: model.ResourceListOptions{Kind: apiv3.KindBGPPeer},
+-			},
+ 		}
+ 
+ 		// If running in kdd mode, also watch Kubernetes network policies directly.
+@@ -109,14 +90,6 @@ func New(client api.Client, cfg apiconfig.CalicoAPIConfigSpec, callbacks api.Syn
+ 				ListInterface:   model.ResourceListOptions{Kind: model.KindKubernetesNetworkPolicy},
+ 				UpdateProcessor: updateprocessors.NewNetworkPolicyUpdateProcessor(),
+ 			})
+-			additionalTypes = append(additionalTypes, watchersyncer.ResourceType{
+-				ListInterface:   model.ResourceListOptions{Kind: model.KindKubernetesAdminNetworkPolicy},
+-				UpdateProcessor: updateprocessors.NewGlobalNetworkPolicyUpdateProcessor(),
+-			})
+-			additionalTypes = append(additionalTypes, watchersyncer.ResourceType{
+-				ListInterface:   model.ResourceListOptions{Kind: model.KindKubernetesBaselineAdminNetworkPolicy},
+-				UpdateProcessor: updateprocessors.NewGlobalNetworkPolicyUpdateProcessor(),
+-			})
+ 			additionalTypes = append(additionalTypes, watchersyncer.ResourceType{
+ 				ListInterface: model.ResourceListOptions{Kind: model.KindKubernetesEndpointSlice},
+ 			})
+-- 
+2.50.1
+

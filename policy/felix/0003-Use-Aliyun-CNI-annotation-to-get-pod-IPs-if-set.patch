@@ -1,18 +1,16 @@
-From 23b3ff3f1837442feba4ce1eb60f9f6b98c5c125 Mon Sep 17 00:00:00 2001
-From: =?UTF-8?q?=E6=B8=85=E5=BC=A6?= <libokang.lbk@alibaba-inc.com>
-Date: Thu, 13 Apr 2023 15:15:34 +0800
-Subject: [PATCH 3/3] Use Aliyun CNI annotation to get pod IPs, if set
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bingshen.wbs <bingshen.wbs@alibaba-inc.com>
+Date: Fri, 6 Nov 2026 17:00:00 +0800
+Subject: [PATCH] Preserve Aliyun Pod IP annotations
+
+Apply to Calico v3.30.0 (572a32dd9b2f9784d66d74712d5ec2e703d25083).
 
 ---
- libcalico-go/lib/backend/k8s/conversion/constants.go  | 3 +++
- libcalico-go/lib/backend/k8s/conversion/conversion.go | 5 ++++-
- 2 files changed, 7 insertions(+), 1 deletion(-)
-
 diff --git a/libcalico-go/lib/backend/k8s/conversion/constants.go b/libcalico-go/lib/backend/k8s/conversion/constants.go
-index 504f4d4fe..9c3f49ff7 100644
+index f48c74f..5f17900 100644
 --- a/libcalico-go/lib/backend/k8s/conversion/constants.go
 +++ b/libcalico-go/lib/backend/k8s/conversion/constants.go
-@@ -36,6 +36,9 @@ const (
+@@ -35,6 +35,9 @@ const (
  	// AnnotationPodIPs is the annotation set by the Amazon VPC CNI plugin.
  	AnnotationAWSPodIPs = "vpc.amazonaws.com/pod-ips"
  
@@ -23,10 +21,10 @@ index 504f4d4fe..9c3f49ff7 100644
  	// that have the same name and namespace.  For example, stateful set pod that is restarted.  May be missing
  	// on older Pods.
 diff --git a/libcalico-go/lib/backend/k8s/conversion/conversion.go b/libcalico-go/lib/backend/k8s/conversion/conversion.go
-index 4f30f6687..c25a9c6d4 100644
+index 998cd4f..4ede60e 100644
 --- a/libcalico-go/lib/backend/k8s/conversion/conversion.go
 +++ b/libcalico-go/lib/backend/k8s/conversion/conversion.go
-@@ -193,7 +193,7 @@ func (c converter) IsHostNetworked(pod *kapiv1.Pod) bool {
+@@ -201,7 +201,7 @@ func (c converter) IsHostNetworked(pod *kapiv1.Pod) bool {
  }
  
  func (c converter) HasIPAddress(pod *kapiv1.Pod) bool {
@@ -35,7 +33,7 @@ index 4f30f6687..c25a9c6d4 100644
  	// Note: we don't need to check PodIPs and AnnotationPodIPs here, because those cannot be
  	// non-empty if the corresponding singular field is empty.
  }
-@@ -221,6 +221,9 @@ func getPodIPs(pod *kapiv1.Pod) ([]*cnet.IPNet, error) {
+@@ -229,6 +229,9 @@ func getPodIPs(pod *kapiv1.Pod) ([]*cnet.IPNet, error) {
  	} else if ips := pod.Annotations[AnnotationAWSPodIPs]; ips != "" {
  		logc.WithField("ips", ips).Debug("No PodStatus IPs, use AWS VPC annotation")
  		podIPs = append(podIPs, strings.Split(ips, ",")...)
@@ -45,6 +43,59 @@ index 4f30f6687..c25a9c6d4 100644
  	} else {
  		logc.Debug("Pod has no IP")
  		return nil, nil
+diff --git a/libcalico-go/lib/backend/k8s/conversion/terway_annotation_test.go b/libcalico-go/lib/backend/k8s/conversion/terway_annotation_test.go
+new file mode 100644
+index 0000000..c4f09f9
+--- /dev/null
++++ b/libcalico-go/lib/backend/k8s/conversion/terway_annotation_test.go
+@@ -0,0 +1,48 @@
++package conversion
++
++import (
++	"reflect"
++	"testing"
++
++	kapiv1 "k8s.io/api/core/v1"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++)
++
++func TestTerwayPodIPAnnotation(t *testing.T) {
++	for _, tc := range []struct {
++		name       string
++		annotation string
++		statusIP   string
++		want       []string
++		wantError  bool
++	}{
++		{name: "IPv4 before status", annotation: "192.0.2.1", want: []string{"192.0.2.1/32"}},
++		{name: "dual stack before status", annotation: "192.0.2.1,2001:db8::1", want: []string{"192.0.2.1/32", "2001:db8::1/128"}},
++		{name: "status takes precedence", annotation: "192.0.2.1", statusIP: "192.0.2.2", want: []string{"192.0.2.2/32"}},
++		{name: "invalid annotation", annotation: "invalid", wantError: true},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			pod := &kapiv1.Pod{
++				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationAliyunPodIPs: tc.annotation}},
++				Status:     kapiv1.PodStatus{PodIP: tc.statusIP},
++			}
++			if !NewConverter().HasIPAddress(pod) {
++				t.Fatal("Terway annotation must identify an addressed Pod before status is populated")
++			}
++			ips, err := getPodIPs(pod)
++			if (err != nil) != tc.wantError {
++				t.Fatalf("getPodIPs error = %v, wantError = %v", err, tc.wantError)
++			}
++			if tc.wantError {
++				return
++			}
++			var got []string
++			for _, ip := range ips {
++				got = append(got, ip.String())
++			}
++			if !reflect.DeepEqual(got, tc.want) {
++				t.Fatalf("getPodIPs = %v, want %v", got, tc.want)
++			}
++		})
++	}
++}
 -- 
-2.40.0
-
+2.50.1

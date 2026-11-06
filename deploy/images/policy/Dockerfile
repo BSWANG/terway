@@ -2,8 +2,8 @@ FROM --platform=$TARGETPLATFORM golang:1.26.10 AS felix-builder
 ARG GOPROXY
 ARG GIT_VERSION
 ENV GOPROXY $GOPROXY
-ENV GIT_BRANCH=v3.24.5
-ENV GIT_COMMIT=f1a1611acb98d9187f48bbbe2227301aa69f0499
+ENV GIT_BRANCH=v3.30.0
+ENV GIT_COMMIT=572a32dd9b2f9784d66d74712d5ec2e703d25083
 
 RUN mkdir -p /go/src/github.com/projectcalico/ && cd /go/src/github.com/projectcalico/ && \
     git clone -b ${GIT_BRANCH} --depth 1 https://github.com/projectcalico/calico.git && \
