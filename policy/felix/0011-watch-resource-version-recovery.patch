@@ -1,0 +1,127 @@
+From c3579cff1eb5fd3a83b3cad0e2198b92267f1ec9 Mon Sep 17 00:00:00 2001
+From: "bingshen.wbs" <bingshen.wbs@alibaba-inc.com>
+Date: Fri, 6 Nov 2026 16:55:32 +0800
+Subject: [PATCH] fix: recover expired and throttled watches
+
+Upstream-commit: 07163f8a4b8ab851706d95bd7ad3d6bc7ebfd031
+---
+ .../backend/watchersyncer/reflector_ports.go  | 54 +++++++++++++++++++
+ .../lib/backend/watchersyncer/watchercache.go | 20 +++----
+ 2 files changed, 65 insertions(+), 9 deletions(-)
+ create mode 100644 libcalico-go/lib/backend/watchersyncer/reflector_ports.go
+
+diff --git a/libcalico-go/lib/backend/watchersyncer/reflector_ports.go b/libcalico-go/lib/backend/watchersyncer/reflector_ports.go
+new file mode 100644
+index 0000000..85f6909
+--- /dev/null
++++ b/libcalico-go/lib/backend/watchersyncer/reflector_ports.go
+@@ -0,0 +1,54 @@
++// Extracted from on Kubernetes reflector.go, Copyright 2014 The Kubernetes Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//      http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package watchersyncer
++
++import (
++	"strings"
++
++	apierrors "k8s.io/apimachinery/pkg/api/errors"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++)
++
++// Copied from client-go's reflector.go
++func isTooLargeResourceVersionError(err error) bool {
++	if apierrors.HasStatusCause(err, metav1.CauseTypeResourceVersionTooLarge) {
++		return true
++	}
++	// In Kubernetes 1.17.0-1.18.5, the api server doesn't set the error status cause to
++	// metav1.CauseTypeResourceVersionTooLarge to indicate that the requested minimum resource
++	// version is larger than the largest currently available resource version. To ensure backward
++	// compatibility with these server versions we also need to detect the error based on the content
++	// of the error message field.
++	if !apierrors.IsTimeout(err) {
++		return false
++	}
++	apierr, ok := err.(apierrors.APIStatus)
++	if !ok || apierr == nil || apierr.Status().Details == nil {
++		return false
++	}
++	for _, cause := range apierr.Status().Details.Causes {
++		// Matches the message returned by api server 1.17.0-1.18.5 for this error condition
++		if cause.Message == "Too large resource version" {
++			return true
++		}
++	}
++
++	// Matches the message returned by api server before 1.17.0
++	if strings.Contains(apierr.Status().Message, "Too large resource version") {
++		return true
++	}
++
++	return false
++}
+diff --git a/libcalico-go/lib/backend/watchersyncer/watchercache.go b/libcalico-go/lib/backend/watchersyncer/watchercache.go
+index 06df04b..61ef9c8 100644
+--- a/libcalico-go/lib/backend/watchersyncer/watchercache.go
++++ b/libcalico-go/lib/backend/watchersyncer/watchercache.go
+@@ -17,11 +17,11 @@ package watchersyncer
+ import (
+ 	"context"
+ 	"errors"
+-	"syscall"
+ 	"time"
+ 
+ 	"github.com/sirupsen/logrus"
+ 	kerrors "k8s.io/apimachinery/pkg/api/errors"
++	utilnet "k8s.io/apimachinery/pkg/util/net"
+ 
+ 	"github.com/projectcalico/calico/libcalico-go/lib/backend/api"
+ 	"github.com/projectcalico/calico/libcalico-go/lib/backend/model"
+@@ -256,23 +256,25 @@ func (wc *watcherCache) resyncAndCreateWatcher(ctx context.Context) {
+ 			AllowWatchBookmarks: true,
+ 		})
+ 		if err != nil {
+-			if kerrors.IsResourceExpired(err) {
+-				// Our current watch revision is too old. Start again without a revision.
++			if kerrors.IsResourceExpired(err) || kerrors.IsGone(err) || isTooLargeResourceVersionError(err) {
++				// Our current watch revision is too old (or too new!). Start again
++				// without a revision. Condition cribbed from client-go's reflector.
+ 				wc.logger.Info("Watch has expired, queueing full resync.")
+ 				wc.resetWatchRevisionForFullResync()
+ 				continue
+ 			}
+ 
+-			if errors.Is(err, syscall.ECONNREFUSED) {
+-				// Server is down, retry after a short delay.  We don't want to
+-				// reset the watch revision since the server is down; it's not our
+-				// fault.
++			if utilnet.IsConnectionRefused(err) || kerrors.IsTooManyRequests(err) {
++				// Connection-related error, we can just retry without resetting
++				// the watch. Condition cribbed from client-go's reflector.
+ 				wc.logger.WithError(err).Warn("API server refused connection, will retry.")
+ 				continue
+ 			}
+ 
+-			if errors.Is(err, cerrors.ErrorOperationNotSupported{}) ||
+-				errors.Is(err, cerrors.ErrorResourceDoesNotExist{}) {
++			var errNotSupp cerrors.ErrorOperationNotSupported
++			var errNotExist cerrors.ErrorResourceDoesNotExist
++			if errors.As(err, &errNotSupp) ||
++				errors.As(err, &errNotExist) {
+ 				// Watch is not supported on this resource type, either because the type fundamentally
+ 				// doesn't support it, or because there are no resources to watch yet (and Kubernetes won't
+ 				// let us watch if there are no resources yet). Pause for the watch poll interval.
+-- 
+2.54.0 (Apple Git-157)
+
+

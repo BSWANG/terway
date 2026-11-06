@@ -1,0 +1,806 @@
+From 34f413b1a547ff5b644a899037c259c0f7527372 Mon Sep 17 00:00:00 2001
+From: "bingshen.wbs" <bingshen.wbs@alibaba-inc.com>
+Date: Fri, 6 Nov 2026 16:53:09 +0800
+Subject: [PATCH] refactor: backport backend WatchOptions to v3.24.5
+
+Upstream-commit: bf7146fc171775729224a7899b5337518a408604
+
+Resolve context against v3.24.5 and omit API types absent from this release.
+---
+ .../datastore/migrate/migrateipam_test.go     |  2 +-
+ libcalico-go/lib/backend/api/api.go           |  6 ++-
+ libcalico-go/lib/backend/etcdv3/watcher.go    |  6 +--
+ libcalico-go/lib/backend/k8s/k8s.go           |  7 ++-
+ libcalico-go/lib/backend/k8s/k8s_test.go      | 54 +++++++++----------
+ .../lib/backend/k8s/resources/client.go       |  2 +-
+ .../backend/k8s/resources/customresource.go   |  7 ++-
+ .../backend/k8s/resources/ipam_affinity.go    |  5 +-
+ .../lib/backend/k8s/resources/ipam_block.go   |  5 +-
+ .../lib/backend/k8s/resources/ipam_config.go  |  4 +-
+ .../lib/backend/k8s/resources/ipam_handle.go  |  8 +--
+ .../lib/backend/k8s/resources/k8sservice.go   |  8 +--
+ .../k8s/resources/kubeendpointslice.go        | 10 ++--
+ .../k8s/resources/kubenetworkpolicy.go        | 11 ++--
+ .../lib/backend/k8s/resources/node.go         |  8 +--
+ .../lib/backend/k8s/resources/profile.go      | 20 +++----
+ .../lib/backend/k8s/resources/resources.go    |  8 +++
+ .../backend/k8s/resources/workloadendpoint.go |  8 +--
+ .../k8s/resources/workloadendpoint_test.go    |  3 +-
+ .../lib/backend/watchersyncer/watchercache.go |  4 +-
+ .../watchersyncer/watchersyncer_test.go       |  4 +-
+ libcalico-go/lib/clientv3/resources.go        |  2 +-
+ .../lib/ipam/ipam_block_reader_writer_test.go |  2 +-
+ 23 files changed, 103 insertions(+), 91 deletions(-)
+
+diff --git a/calicoctl/calicoctl/commands/datastore/migrate/migrateipam_test.go b/calicoctl/calicoctl/commands/datastore/migrate/migrateipam_test.go
+index 29b8f5e..e7357c8 100644
+--- a/calicoctl/calicoctl/commands/datastore/migrate/migrateipam_test.go
++++ b/calicoctl/calicoctl/commands/datastore/migrate/migrateipam_test.go
+@@ -346,7 +346,7 @@ func (bc *MockIPAMBackendClient) List(ctx context.Context, list model.ListInterf
+ 	return nil, nil
+ }
+ 
+-func (bc *MockIPAMBackendClient) Watch(ctx context.Context, list model.ListInterface, revision string) (bapi.WatchInterface, error) {
++func (bc *MockIPAMBackendClient) Watch(ctx context.Context, list model.ListInterface, options bapi.WatchOptions) (bapi.WatchInterface, error) {
+ 	// DO NOTHING
+ 	return bapi.NewFake(), nil
+ }
+diff --git a/libcalico-go/lib/backend/api/api.go b/libcalico-go/lib/backend/api/api.go
+index 14bfd8e..a7ce4a3 100644
+--- a/libcalico-go/lib/backend/api/api.go
++++ b/libcalico-go/lib/backend/api/api.go
+@@ -111,7 +111,7 @@ type Client interface {
+ 
+ 	// Watch returns a WatchInterface used for watching a resources matching the
+ 	// input list options.
+-	Watch(ctx context.Context, list model.ListInterface, revision string) (WatchInterface, error)
++	Watch(ctx context.Context, list model.ListInterface, options WatchOptions) (WatchInterface, error)
+ 
+ 	// EnsureInitialized ensures that the backend is initialized
+ 	// any ready to be used.
+@@ -124,6 +124,10 @@ type Client interface {
+ 	//Close()
+ }
+ 
++type WatchOptions struct {
++	Revision string
++}
++
+ type Syncer interface {
+ 	// Starts the Syncer.  May start a background goroutine.
+ 	Start()
+diff --git a/libcalico-go/lib/backend/etcdv3/watcher.go b/libcalico-go/lib/backend/etcdv3/watcher.go
+index ac711e1..038f63e 100644
+--- a/libcalico-go/lib/backend/etcdv3/watcher.go
++++ b/libcalico-go/lib/backend/etcdv3/watcher.go
+@@ -31,11 +31,11 @@ const (
+ )
+ 
+ // Watch entries in the datastore matching the resources specified by the ListInterface.
+-func (c *etcdV3Client) Watch(cxt context.Context, l model.ListInterface, revision string) (api.WatchInterface, error) {
++func (c *etcdV3Client) Watch(cxt context.Context, l model.ListInterface, options api.WatchOptions) (api.WatchInterface, error) {
+ 	var rev int64
+-	if len(revision) != 0 {
++	if len(options.Revision) != 0 {
+ 		var err error
+-		rev, err = strconv.ParseInt(revision, 10, 64)
++		rev, err = strconv.ParseInt(options.Revision, 10, 64)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+diff --git a/libcalico-go/lib/backend/k8s/k8s.go b/libcalico-go/lib/backend/k8s/k8s.go
+index 5a85568..2be8f97 100644
+--- a/libcalico-go/lib/backend/k8s/k8s.go
++++ b/libcalico-go/lib/backend/k8s/k8s.go
+@@ -676,9 +676,8 @@ func (c *KubeClient) List(ctx context.Context, l model.ListInterface, revision s
+ 	return client.List(ctx, l, revision)
+ }
+ 
+-// List entries in the datastore.  This may return an empty list if there are
+-// no entries matching the request in the ListInterface.
+-func (c *KubeClient) Watch(ctx context.Context, l model.ListInterface, revision string) (api.WatchInterface, error) {
++// Watch starts a watch on a particular resource type.
++func (c *KubeClient) Watch(ctx context.Context, l model.ListInterface, options api.WatchOptions) (api.WatchInterface, error) {
+ 	log.Debugf("Performing 'Watch' for %+v %v", l, reflect.TypeOf(l))
+ 	client := c.getResourceClientFromList(l)
+ 	if client == nil {
+@@ -688,7 +687,7 @@ func (c *KubeClient) Watch(ctx context.Context, l model.ListInterface, revision
+ 			Operation:  "Watch",
+ 		}
+ 	}
+-	return client.Watch(ctx, l, revision)
++	return client.Watch(ctx, l, options)
+ }
+ 
+ func (c *KubeClient) getReadyStatus(ctx context.Context, k model.ReadyFlagKey, revision string) (*model.KVPair, error) {
+diff --git a/libcalico-go/lib/backend/k8s/k8s_test.go b/libcalico-go/lib/backend/k8s/k8s_test.go
+index 5eb5614..13f6b65 100644
+--- a/libcalico-go/lib/backend/k8s/k8s_test.go
++++ b/libcalico-go/lib/backend/k8s/k8s_test.go
+@@ -543,7 +543,7 @@ var _ = testutils.E2eDatastoreDescribe("Test Syncer API for Kubernetes backend",
+ 		By("watching all profiles with a valid rv does not return an event for the default-allow profile", func() {
+ 			rvs := []string{"", "0", "1000000/", "1000/1000", "/100000000"}
+ 			for _, rv := range rvs {
+-				watch, err := c.Watch(ctx, model.ResourceListOptions{Kind: apiv3.KindProfile}, rv)
++				watch, err := c.Watch(ctx, model.ResourceListOptions{Kind: apiv3.KindProfile}, api.WatchOptions{Revision: rv})
+ 				Expect(err).NotTo(HaveOccurred())
+ 				defer watch.Stop()
+ 
+@@ -554,7 +554,7 @@ var _ = testutils.E2eDatastoreDescribe("Test Syncer API for Kubernetes backend",
+ 		By("watching the default-allow profile with any rv does not return an event", func() {
+ 			rvs := []string{"", "0"}
+ 			for _, rv := range rvs {
+-				watch, err := c.Watch(ctx, model.ResourceListOptions{Name: "projectcalico-default-allow", Kind: apiv3.KindProfile}, rv)
++				watch, err := c.Watch(ctx, model.ResourceListOptions{Name: "projectcalico-default-allow", Kind: apiv3.KindProfile}, api.WatchOptions{Revision: rv})
+ 				Expect(err).NotTo(HaveOccurred())
+ 				defer watch.Stop()
+ 				select {
+@@ -2391,27 +2391,27 @@ var _ = testutils.E2eDatastoreDescribe("Test Watch support", testutils.Datastore
+ 			deleteAllServiceAccounts()
+ 		})
+ 		It("supports watching a specific profile (from namespace)", func() {
+-			watch, err := c.Watch(ctx, model.ResourceListOptions{Name: "kns.default", Kind: apiv3.KindProfile}, "")
++			watch, err := c.Watch(ctx, model.ResourceListOptions{Name: "kns.default", Kind: apiv3.KindProfile}, api.WatchOptions{Revision: ""})
+ 			Expect(err).NotTo(HaveOccurred())
+ 			defer watch.Stop()
+ 			event := ExpectAddedEvent(watch.ResultChan())
+ 			Expect(event.New.Key.String()).To(Equal("Profile(kns.default)"))
+ 		})
+ 		It("supports watching a specific profile (from serviceAccount)", func() {
+-			watch, err := c.Watch(ctx, model.ResourceListOptions{Name: "ksa.default.test-sa-1", Kind: apiv3.KindProfile}, "")
++			watch, err := c.Watch(ctx, model.ResourceListOptions{Name: "ksa.default.test-sa-1", Kind: apiv3.KindProfile}, api.WatchOptions{Revision: ""})
+ 			Expect(err).NotTo(HaveOccurred())
+ 			defer watch.Stop()
+ 			event := ExpectAddedEvent(watch.ResultChan())
+ 			Expect(event.New.Key.String()).To(Equal("Profile(ksa.default.test-sa-1)"))
+ 		})
+ 		It("supports watching all profiles", func() {
+-			watch, err := c.Watch(ctx, model.ResourceListOptions{Kind: apiv3.KindProfile}, "")
++			watch, err := c.Watch(ctx, model.ResourceListOptions{Kind: apiv3.KindProfile}, api.WatchOptions{Revision: ""})
+ 			Expect(err).NotTo(HaveOccurred())
+ 			defer watch.Stop()
+ 			ExpectAddedEvent(watch.ResultChan())
+ 		})
+ 		It("rejects names without prefixes", func() {
+-			_, err := c.Watch(ctx, model.ResourceListOptions{Name: "default", Kind: apiv3.KindProfile}, "")
++			_, err := c.Watch(ctx, model.ResourceListOptions{Name: "default", Kind: apiv3.KindProfile}, api.WatchOptions{Revision: ""})
+ 			Expect(err).To(HaveOccurred())
+ 			Expect(err.Error()).To(Equal("Unsupported prefix for resource name: default"))
+ 		})
+@@ -2440,18 +2440,18 @@ var _ = testutils.E2eDatastoreDescribe("Test Watch support", testutils.Datastore
+ 			deleteAllNetworkPolicies()
+ 		})
+ 		It("supports watching all networkpolicies", func() {
+-			watch, err := c.Watch(ctx, model.ResourceListOptions{Kind: model.KindKubernetesNetworkPolicy}, "")
++			watch, err := c.Watch(ctx, model.ResourceListOptions{Kind: model.KindKubernetesNetworkPolicy}, api.WatchOptions{Revision: ""})
+ 			Expect(err).NotTo(HaveOccurred())
+ 			defer watch.Stop()
+ 			ExpectAddedEvent(watch.ResultChan())
+ 		})
+ 		It("supports resuming watch from previous revision", func() {
+-			watch, err := c.Watch(ctx, model.ResourceListOptions{Kind: model.KindKubernetesNetworkPolicy}, "")
++			watch, err := c.Watch(ctx, model.ResourceListOptions{Kind: model.KindKubernetesNetworkPolicy}, api.WatchOptions{Revision: ""})
+ 			Expect(err).NotTo(HaveOccurred())
+ 			event := ExpectAddedEvent(watch.ResultChan())
+ 			watch.Stop()
+ 
+-			watch, err = c.Watch(ctx, model.ResourceListOptions{Kind: model.KindKubernetesNetworkPolicy}, event.New.Revision)
++			watch, err = c.Watch(ctx, model.ResourceListOptions{Kind: model.KindKubernetesNetworkPolicy}, api.WatchOptions{Revision: event.New.Revision})
+ 			Expect(err).NotTo(HaveOccurred())
+ 			watch.Stop()
+ 		})
+@@ -2500,19 +2500,19 @@ var _ = testutils.E2eDatastoreDescribe("Test Watch support", testutils.Datastore
+ 			deleteAllNetworkPolicies()
+ 		})
+ 		It("supports watching a specific networkpolicy", func() {
+-			watch, err := c.Watch(ctx, model.ResourceListOptions{Name: "test-net-policy-3", Namespace: "default", Kind: apiv3.KindNetworkPolicy}, "")
++			watch, err := c.Watch(ctx, model.ResourceListOptions{Name: "test-net-policy-3", Namespace: "default", Kind: apiv3.KindNetworkPolicy}, api.WatchOptions{Revision: ""})
+ 			Expect(err).NotTo(HaveOccurred())
+ 			defer watch.Stop()
+ 			event := ExpectAddedEvent(watch.ResultChan())
+ 			Expect(event.New.Key.String()).To(Equal("NetworkPolicy(default/test-net-policy-3)"))
+ 		})
+ 		It("rejects watching a specific networkpolicy without a namespace", func() {
+-			_, err := c.Watch(ctx, model.ResourceListOptions{Name: "test-net-policy-3", Kind: apiv3.KindNetworkPolicy}, "")
++			_, err := c.Watch(ctx, model.ResourceListOptions{Name: "test-net-policy-3", Kind: apiv3.KindNetworkPolicy}, api.WatchOptions{Revision: ""})
+ 			Expect(err).To(HaveOccurred())
+ 			Expect(err.Error()).To(Equal("name present, but missing namespace on watch request"))
+ 		})
+ 		It("supports watching all networkpolicies", func() {
+-			watch, err := c.Watch(ctx, model.ResourceListOptions{Kind: apiv3.KindNetworkPolicy}, "")
++			watch, err := c.Watch(ctx, model.ResourceListOptions{Kind: apiv3.KindNetworkPolicy}, api.WatchOptions{Revision: ""})
+ 			Expect(err).NotTo(HaveOccurred())
+ 			defer watch.Stop()
+ 			ExpectAddedEvent(watch.ResultChan())
+@@ -2599,7 +2599,7 @@ var _ = testutils.E2eDatastoreDescribe("Test Watch support", testutils.Datastore
+ 			Expect(found).To(Equal(2))
+ 
+ 			log.WithField("revision", l.Revision).Info("[TEST] first watch")
+-			watch, err := c.Watch(ctx, model.ResourceListOptions{Kind: apiv3.KindNetworkPolicy}, l.Revision)
++			watch, err := c.Watch(ctx, model.ResourceListOptions{Kind: apiv3.KindNetworkPolicy}, api.WatchOptions{Revision: l.Revision})
+ 			Expect(err).NotTo(HaveOccurred())
+ 
+ 			// We should see 2 events for Calico NPs.
+@@ -2619,7 +2619,7 @@ var _ = testutils.E2eDatastoreDescribe("Test Watch support", testutils.Datastore
+ 
+ 			// Resume watching at the revision of the event we got
+ 			log.WithField("revision", event.New.Revision).Info("second watch")
+-			watch, err = c.Watch(ctx, model.ResourceListOptions{Kind: apiv3.KindNetworkPolicy}, event.New.Revision)
++			watch, err = c.Watch(ctx, model.ResourceListOptions{Kind: apiv3.KindNetworkPolicy}, api.WatchOptions{Revision: event.New.Revision})
+ 			Expect(err).NotTo(HaveOccurred())
+ 
+ 			// We should only get 1 update, because the event from the previous watch should have been "latest"
+@@ -2660,7 +2660,7 @@ var _ = testutils.E2eDatastoreDescribe("Test Watch support", testutils.Datastore
+ 			Expect(found).To(Equal(2))
+ 
+ 			log.WithField("revision", l.Revision).Info("[TEST] first watch")
+-			watch, err := c.Watch(ctx, model.ResourceListOptions{Kind: model.KindKubernetesNetworkPolicy}, l.Revision)
++			watch, err := c.Watch(ctx, model.ResourceListOptions{Kind: model.KindKubernetesNetworkPolicy}, api.WatchOptions{Revision: l.Revision})
+ 			Expect(err).NotTo(HaveOccurred())
+ 
+ 			event := ExpectModifiedEvent(watch.ResultChan())
+@@ -2685,7 +2685,7 @@ var _ = testutils.E2eDatastoreDescribe("Test Watch support", testutils.Datastore
+ 
+ 			// Resume watching at the revision of the event we got
+ 			log.WithField("revision", event.New.Revision).Info("second watch")
+-			watch, err = c.Watch(ctx, model.ResourceListOptions{Kind: model.KindKubernetesNetworkPolicy}, event.New.Revision)
++			watch, err = c.Watch(ctx, model.ResourceListOptions{Kind: model.KindKubernetesNetworkPolicy}, api.WatchOptions{Revision: event.New.Revision})
+ 			Expect(err).NotTo(HaveOccurred())
+ 
+ 			// We should only get 1 update, because the event from the previous watch should have been "latest"
+@@ -2709,7 +2709,7 @@ var _ = testutils.E2eDatastoreDescribe("Test Watch support", testutils.Datastore
+ 					"revision": revision,
+ 					"key":      l.KVPairs[i].Key.String(),
+ 				}).Info("[Test] starting watch")
+-				watch, err := c.Watch(ctx, model.ResourceListOptions{Kind: apiv3.KindNetworkPolicy}, revision)
++				watch, err := c.Watch(ctx, model.ResourceListOptions{Kind: apiv3.KindNetworkPolicy}, api.WatchOptions{Revision: revision})
+ 				Expect(err).ToNot(HaveOccurred())
+ 				// Since the items in the list aren't guaranteed to be in any specific order, we
+ 				// can't assert anything useful about what you should get out of this watch, so we
+@@ -2731,7 +2731,7 @@ var _ = testutils.E2eDatastoreDescribe("Test Watch support", testutils.Datastore
+ 					"revision": revision,
+ 					"key":      l.KVPairs[i].Key.String(),
+ 				}).Info("[Test] starting watch")
+-				watch, err := c.Watch(ctx, model.ResourceListOptions{Kind: apiv3.KindNetworkPolicy}, revision)
++				watch, err := c.Watch(ctx, model.ResourceListOptions{Kind: apiv3.KindNetworkPolicy}, api.WatchOptions{Revision: revision})
+ 				Expect(err).ToNot(HaveOccurred())
+ 				// Since the items in the list aren't guaranteed to be in any specific order, we
+ 				// can't assert anything useful about what you should get out of this watch, so we
+@@ -2777,14 +2777,14 @@ var _ = testutils.E2eDatastoreDescribe("Test Watch support", testutils.Datastore
+ 			deleteAllIPPools()
+ 		})
+ 		It("supports watching a specific custom resource (IPPool)", func() {
+-			watch, err := c.Watch(ctx, model.ResourceListOptions{Name: "test-ippool-1", Kind: apiv3.KindIPPool}, "")
++			watch, err := c.Watch(ctx, model.ResourceListOptions{Name: "test-ippool-1", Kind: apiv3.KindIPPool}, api.WatchOptions{Revision: ""})
+ 			Expect(err).NotTo(HaveOccurred())
+ 			defer watch.Stop()
+ 			event := ExpectAddedEvent(watch.ResultChan())
+ 			Expect(event.New.Key.String()).To(Equal("IPPool(test-ippool-1)"))
+ 		})
+ 		It("supports watching all custom resources (IPPool)", func() {
+-			watch, err := c.Watch(ctx, model.ResourceListOptions{Kind: apiv3.KindIPPool}, "")
++			watch, err := c.Watch(ctx, model.ResourceListOptions{Kind: apiv3.KindIPPool}, api.WatchOptions{Revision: ""})
+ 			Expect(err).NotTo(HaveOccurred())
+ 			defer watch.Stop()
+ 			ExpectAddedEvent(watch.ResultChan())
+@@ -2825,19 +2825,19 @@ var _ = testutils.E2eDatastoreDescribe("Test Watch support", testutils.Datastore
+ 			deleteAllPods()
+ 		})
+ 		It("supports watching a specific workloadEndpoint", func() {
+-			watch, err := c.Watch(ctx, model.ResourceListOptions{Name: "127.0.0.1-k8s-test--pod--1-eth0", Namespace: "default", Kind: libapiv3.KindWorkloadEndpoint}, "")
++			watch, err := c.Watch(ctx, model.ResourceListOptions{Name: "127.0.0.1-k8s-test--pod--1-eth0", Namespace: "default", Kind: libapiv3.KindWorkloadEndpoint}, api.WatchOptions{Revision: ""})
+ 			Expect(err).NotTo(HaveOccurred())
+ 			defer watch.Stop()
+ 			event := ExpectAddedEvent(watch.ResultChan())
+ 			Expect(event.New.Key.String()).To(Equal("WorkloadEndpoint(default/127.0.0.1-k8s-test--pod--1-eth0)"))
+ 		})
+ 		It("rejects watching a specific workloadEndpoint without a namespace", func() {
+-			_, err := c.Watch(ctx, model.ResourceListOptions{Name: "127.0.0.1-k8s-test--pod--1-eth0", Kind: libapiv3.KindWorkloadEndpoint}, "")
++			_, err := c.Watch(ctx, model.ResourceListOptions{Name: "127.0.0.1-k8s-test--pod--1-eth0", Kind: libapiv3.KindWorkloadEndpoint}, api.WatchOptions{Revision: ""})
+ 			Expect(err).To(HaveOccurred())
+ 			Expect(err.Error()).To(Equal("cannot watch a specific WorkloadEndpoint without a namespace"))
+ 		})
+ 		It("supports watching all workloadEndpoints", func() {
+-			watch, err := c.Watch(ctx, model.ResourceListOptions{Kind: libapiv3.KindWorkloadEndpoint}, "")
++			watch, err := c.Watch(ctx, model.ResourceListOptions{Kind: libapiv3.KindWorkloadEndpoint}, api.WatchOptions{Revision: ""})
+ 			Expect(err).NotTo(HaveOccurred())
+ 			defer watch.Stop()
+ 			ExpectAddedEvent(watch.ResultChan())
+@@ -2847,7 +2847,7 @@ var _ = testutils.E2eDatastoreDescribe("Test Watch support", testutils.Datastore
+ 	It("Should support watching Nodes", func() {
+ 		By("Watching a single node", func() {
+ 			name := "127.0.0.1" // Node created by test/mock-node.yaml
+-			watch, err := c.Watch(ctx, model.ResourceListOptions{Name: name, Kind: libapiv3.KindNode}, "")
++			watch, err := c.Watch(ctx, model.ResourceListOptions{Name: name, Kind: libapiv3.KindNode}, api.WatchOptions{Revision: ""})
+ 			Expect(err).NotTo(HaveOccurred())
+ 			defer watch.Stop()
+ 
+@@ -2869,7 +2869,7 @@ var _ = testutils.E2eDatastoreDescribe("Test Watch support", testutils.Datastore
+ 		})
+ 
+ 		By("Watching all nodes", func() {
+-			watch, err := c.Watch(ctx, model.ResourceListOptions{Kind: libapiv3.KindNode}, "")
++			watch, err := c.Watch(ctx, model.ResourceListOptions{Kind: libapiv3.KindNode}, api.WatchOptions{Revision: ""})
+ 			Expect(err).NotTo(HaveOccurred())
+ 			defer watch.Stop()
+ 
+@@ -2893,7 +2893,7 @@ var _ = testutils.E2eDatastoreDescribe("Test Watch support", testutils.Datastore
+ 
+ 	It("should support watching BlockAffinities", func() {
+ 		By("watching all affinities", func() {
+-			watch, err := c.Watch(ctx, model.BlockAffinityListOptions{}, "")
++			watch, err := c.Watch(ctx, model.BlockAffinityListOptions{}, api.WatchOptions{Revision: ""})
+ 			Expect(err).NotTo(HaveOccurred())
+ 			defer watch.Stop()
+ 
+@@ -2927,7 +2927,7 @@ var _ = testutils.E2eDatastoreDescribe("Test Watch support", testutils.Datastore
+ 
+ 	It("should support watching IPAM blocks", func() {
+ 		By("watching all blocks", func() {
+-			watch, err := c.Watch(ctx, model.BlockListOptions{}, "")
++			watch, err := c.Watch(ctx, model.BlockListOptions{}, api.WatchOptions{Revision: ""})
+ 			Expect(err).NotTo(HaveOccurred())
+ 			defer watch.Stop()
+ 
+diff --git a/libcalico-go/lib/backend/k8s/resources/client.go b/libcalico-go/lib/backend/k8s/resources/client.go
+index 1554fdf..12b29d7 100644
+--- a/libcalico-go/lib/backend/k8s/resources/client.go
++++ b/libcalico-go/lib/backend/k8s/resources/client.go
+@@ -64,7 +64,7 @@ type K8sResourceClient interface {
+ 
+ 	// Watch returns a WatchInterface used for watching resources matching the
+ 	// input list options.
+-	Watch(ctx context.Context, list model.ListInterface, revision string) (api.WatchInterface, error)
++	Watch(ctx context.Context, list model.ListInterface, options api.WatchOptions) (api.WatchInterface, error)
+ 
+ 	// EnsureInitialized ensures that the backend is initialized
+ 	// any ready to be used.
+diff --git a/libcalico-go/lib/backend/k8s/resources/customresource.go b/libcalico-go/lib/backend/k8s/resources/customresource.go
+index 54460e0..015b9b6 100644
+--- a/libcalico-go/lib/backend/k8s/resources/customresource.go
++++ b/libcalico-go/lib/backend/k8s/resources/customresource.go
+@@ -318,9 +318,7 @@ func (c *customK8sResourceClient) List(ctx context.Context, list model.ListInter
+ 	return pagedList(ctx, logContext, revision, list, convertFunc, listFunc)
+ }
+ 
+-func (c *customK8sResourceClient) Watch(ctx context.Context, list model.ListInterface, revision string) (api.WatchInterface, error) {
+-	// Build watch options to pass to k8s.
+-	opts := metav1.ListOptions{ResourceVersion: revision, Watch: true, AllowWatchBookmarks: false}
++func (c *customK8sResourceClient) Watch(ctx context.Context, list model.ListInterface, options api.WatchOptions) (api.WatchInterface, error) {
+ 	rlo, ok := list.(model.ResourceListOptions)
+ 	if !ok {
+ 		return nil, fmt.Errorf("ListInterface is not a ResourceListOptions: %s", list)
+@@ -338,7 +336,8 @@ func (c *customK8sResourceClient) Watch(ctx context.Context, list model.ListInte
+ 	}
+ 
+ 	k8sWatchClient := cache.NewListWatchFromClient(c.restClient, c.resource, rlo.Namespace, fieldSelector)
+-	k8sWatch, err := k8sWatchClient.WatchFunc(opts)
++	k8sOpts := watchOptionsToK8sListOptions(options)
++	k8sWatch, err := k8sWatchClient.WatchFunc(k8sOpts)
+ 	if err != nil {
+ 		return nil, K8sErrorToCalico(err, list)
+ 	}
+diff --git a/libcalico-go/lib/backend/k8s/resources/ipam_affinity.go b/libcalico-go/lib/backend/k8s/resources/ipam_affinity.go
+index 9f87624..2117a83 100644
+--- a/libcalico-go/lib/backend/k8s/resources/ipam_affinity.go
++++ b/libcalico-go/lib/backend/k8s/resources/ipam_affinity.go
+@@ -410,10 +410,11 @@ func (c *blockAffinityClient) toKVPairV3(r Resource) (*model.KVPair, error) {
+ 	return c.rc.convertResourceToKVPair(r)
+ }
+ 
+-func (c *blockAffinityClient) Watch(ctx context.Context, list model.ListInterface, revision string) (api.WatchInterface, error) {
++func (c *blockAffinityClient) Watch(ctx context.Context, list model.ListInterface, options api.WatchOptions) (api.WatchInterface, error) {
+ 	resl := model.ResourceListOptions{Kind: libapiv3.KindBlockAffinity}
+ 	k8sWatchClient := cache.NewListWatchFromClient(c.rc.restClient, c.rc.resource, "", fields.Everything())
+-	k8sWatch, err := k8sWatchClient.WatchFunc(metav1.ListOptions{ResourceVersion: revision})
++	k8sOpts := watchOptionsToK8sListOptions(options)
++	k8sWatch, err := k8sWatchClient.WatchFunc(k8sOpts)
+ 	if err != nil {
+ 		return nil, K8sErrorToCalico(err, list)
+ 	}
+diff --git a/libcalico-go/lib/backend/k8s/resources/ipam_block.go b/libcalico-go/lib/backend/k8s/resources/ipam_block.go
+index eb0db18..49c14a9 100644
+--- a/libcalico-go/lib/backend/k8s/resources/ipam_block.go
++++ b/libcalico-go/lib/backend/k8s/resources/ipam_block.go
+@@ -255,10 +255,11 @@ func (c *ipamBlockClient) List(ctx context.Context, list model.ListInterface, re
+ 	return kvpl, nil
+ }
+ 
+-func (c *ipamBlockClient) Watch(ctx context.Context, list model.ListInterface, revision string) (api.WatchInterface, error) {
++func (c *ipamBlockClient) Watch(ctx context.Context, list model.ListInterface, options api.WatchOptions) (api.WatchInterface, error) {
+ 	resl := model.ResourceListOptions{Kind: libapiv3.KindIPAMBlock}
+ 	k8sWatchClient := cache.NewListWatchFromClient(c.rc.restClient, c.rc.resource, "", fields.Everything())
+-	k8sWatch, err := k8sWatchClient.WatchFunc(metav1.ListOptions{ResourceVersion: revision, AllowWatchBookmarks: false})
++	k8sOpts := watchOptionsToK8sListOptions(options)
++	k8sWatch, err := k8sWatchClient.WatchFunc(k8sOpts)
+ 	if err != nil {
+ 		return nil, K8sErrorToCalico(err, list)
+ 	}
+diff --git a/libcalico-go/lib/backend/k8s/resources/ipam_config.go b/libcalico-go/lib/backend/k8s/resources/ipam_config.go
+index 6032c87..0d118b6 100644
+--- a/libcalico-go/lib/backend/k8s/resources/ipam_config.go
++++ b/libcalico-go/lib/backend/k8s/resources/ipam_config.go
+@@ -251,10 +251,10 @@ func (c *ipamConfigClient) List(ctx context.Context, list model.ListInterface, r
+ 	return c.rc.List(ctx, list, revision)
+ }
+ 
+-func (c *ipamConfigClient) Watch(ctx context.Context, list model.ListInterface, revision string) (api.WatchInterface, error) {
++func (c *ipamConfigClient) Watch(ctx context.Context, list model.ListInterface, options api.WatchOptions) (api.WatchInterface, error) {
+ 	// List can only ever come from the v3 client, by passing a ResourceListOptions.
+ 	log.Debug("Received Watch request on IPAMConfig type")
+-	return c.rc.Watch(ctx, list, revision)
++	return c.rc.Watch(ctx, list, options)
+ }
+ 
+ // EnsureInitialized is a no-op since the CRD should be
+diff --git a/libcalico-go/lib/backend/k8s/resources/ipam_handle.go b/libcalico-go/lib/backend/k8s/resources/ipam_handle.go
+index 19b5862..40b11c5 100644
+--- a/libcalico-go/lib/backend/k8s/resources/ipam_handle.go
++++ b/libcalico-go/lib/backend/k8s/resources/ipam_handle.go
+@@ -68,7 +68,7 @@ type ipamHandleClient struct {
+ 	rc customK8sResourceClient
+ }
+ 
+-func (c ipamHandleClient) toV1(kvpv3 *model.KVPair) *model.KVPair {
++func (c *ipamHandleClient) toV1(kvpv3 *model.KVPair) *model.KVPair {
+ 	v3Handle := kvpv3.Value.(*libapiv3.IPAMHandle)
+ 	handleID := v3Handle.Spec.HandleID
+ 	block := v3Handle.Spec.Block
+@@ -87,11 +87,11 @@ func (c ipamHandleClient) toV1(kvpv3 *model.KVPair) *model.KVPair {
+ 	}
+ }
+ 
+-func (c ipamHandleClient) parseKey(k model.Key) string {
++func (c *ipamHandleClient) parseKey(k model.Key) string {
+ 	return strings.ToLower(k.(model.IPAMHandleKey).HandleID)
+ }
+ 
+-func (c ipamHandleClient) toV3(kvpv1 *model.KVPair) *model.KVPair {
++func (c *ipamHandleClient) toV3(kvpv1 *model.KVPair) *model.KVPair {
+ 	name := c.parseKey(kvpv1.Key)
+ 	handle := kvpv1.Key.(model.IPAMHandleKey).HandleID
+ 	block := kvpv1.Value.(*model.IPAMHandle).Block
+@@ -211,7 +211,7 @@ func (c *ipamHandleClient) List(ctx context.Context, list model.ListInterface, r
+ 	return kvpl, nil
+ }
+ 
+-func (c *ipamHandleClient) Watch(ctx context.Context, list model.ListInterface, revision string) (api.WatchInterface, error) {
++func (c *ipamHandleClient) Watch(ctx context.Context, list model.ListInterface, options api.WatchOptions) (api.WatchInterface, error) {
+ 	log.Warn("Operation Watch is not supported on IPAMHandle type")
+ 	return nil, cerrors.ErrorOperationNotSupported{
+ 		Identifier: list,
+diff --git a/libcalico-go/lib/backend/k8s/resources/k8sservice.go b/libcalico-go/lib/backend/k8s/resources/k8sservice.go
+index fa8d49f..a36acf3 100644
+--- a/libcalico-go/lib/backend/k8s/resources/k8sservice.go
++++ b/libcalico-go/lib/backend/k8s/resources/k8sservice.go
+@@ -138,20 +138,20 @@ func (c *serviceClient) EnsureInitialized() error {
+ 	return nil
+ }
+ 
+-func (c *serviceClient) Watch(ctx context.Context, list model.ListInterface, revision string) (api.WatchInterface, error) {
++func (c *serviceClient) Watch(ctx context.Context, list model.ListInterface, options api.WatchOptions) (api.WatchInterface, error) {
+ 	// Build watch options to pass to k8s.
+-	opts := metav1.ListOptions{ResourceVersion: revision, Watch: true}
+ 	rl, ok := list.(model.ResourceListOptions)
+ 	if !ok {
+ 		return nil, fmt.Errorf("ListInterface is not a ResourceListOptions: %s", list)
+ 	}
++	k8sOpts := watchOptionsToK8sListOptions(options)
+ 	if len(rl.Name) != 0 {
+ 		// We've been asked to watch a specific service resource.
+ 		log.WithField("name", rl.Name).Debug("Watching a single service")
+-		opts.FieldSelector = fields.OneTermEqualSelector("metadata.name", rl.Name).String()
++		k8sOpts.FieldSelector = fields.OneTermEqualSelector("metadata.name", rl.Name).String()
+ 	}
+ 
+-	k8sWatch, err := c.clientSet.CoreV1().Services(rl.Namespace).Watch(ctx, opts)
++	k8sWatch, err := c.clientSet.CoreV1().Services(rl.Namespace).Watch(ctx, k8sOpts)
+ 	if err != nil {
+ 		return nil, K8sErrorToCalico(err, list)
+ 	}
+diff --git a/libcalico-go/lib/backend/k8s/resources/kubeendpointslice.go b/libcalico-go/lib/backend/k8s/resources/kubeendpointslice.go
+index 8e8c3c7..d398ff8 100644
+--- a/libcalico-go/lib/backend/k8s/resources/kubeendpointslice.go
++++ b/libcalico-go/lib/backend/k8s/resources/kubeendpointslice.go
+@@ -107,17 +107,15 @@ func (c *endpointSliceClient) List(ctx context.Context, list model.ListInterface
+ 	return pagedList(ctx, logContext, revision, list, convertFunc, listFunc)
+ }
+ 
+-func (c *endpointSliceClient) Watch(ctx context.Context, list model.ListInterface, revision string) (api.WatchInterface, error) {
+-	// Build watch options to pass to k8s.
+-	opts := metav1.ListOptions{Watch: true, AllowWatchBookmarks: false}
++func (c *endpointSliceClient) Watch(ctx context.Context, list model.ListInterface, options api.WatchOptions) (api.WatchInterface, error) {
+ 	_, ok := list.(model.ResourceListOptions)
+ 	if !ok {
+ 		return nil, fmt.Errorf("ListInterface is not a ResourceListOptions: %s", list)
+ 	}
+ 
+-	opts.ResourceVersion = revision
+-	log.Debugf("Watching Kubernetes EndpointSlice at revision %q", revision)
+-	k8sRawWatch, err := c.clientSet.DiscoveryV1().EndpointSlices("").Watch(ctx, opts)
++	log.Debugf("Watching Kubernetes EndpointSlice at revision %q", options.Revision)
++	k8sOpts := watchOptionsToK8sListOptions(options)
++	k8sRawWatch, err := c.clientSet.DiscoveryV1().EndpointSlices("").Watch(ctx, k8sOpts)
+ 	if err != nil {
+ 		return nil, K8sErrorToCalico(err, list)
+ 	}
+diff --git a/libcalico-go/lib/backend/k8s/resources/kubenetworkpolicy.go b/libcalico-go/lib/backend/k8s/resources/kubenetworkpolicy.go
+index 6fc8dc6..e8d3295 100644
+--- a/libcalico-go/lib/backend/k8s/resources/kubenetworkpolicy.go
++++ b/libcalico-go/lib/backend/k8s/resources/kubenetworkpolicy.go
+@@ -112,17 +112,16 @@ func (c *networkPolicyClient) List(ctx context.Context, list model.ListInterface
+ 	return pagedList(ctx, logContext, revision, list, convertFunc, listFunc)
+ }
+ 
+-func (c *networkPolicyClient) Watch(ctx context.Context, list model.ListInterface, revision string) (api.WatchInterface, error) {
+-	// Build watch options to pass to k8s.
+-	opts := metav1.ListOptions{Watch: true, AllowWatchBookmarks: false}
++func (c *networkPolicyClient) Watch(ctx context.Context, list model.ListInterface, options api.WatchOptions) (api.WatchInterface, error) {
++
+ 	_, ok := list.(model.ResourceListOptions)
+ 	if !ok {
+ 		return nil, fmt.Errorf("ListInterface is not a ResourceListOptions: %s", list)
+ 	}
+ 
+-	opts.ResourceVersion = revision
+-	log.Debugf("Watching Kubernetes NetworkPolicy at revision %q", revision)
+-	k8sRawWatch, err := c.clientSet.NetworkingV1().NetworkPolicies("").Watch(ctx, opts)
++	k8sOpts := watchOptionsToK8sListOptions(options)
++	log.Debugf("Watching Kubernetes NetworkPolicy at revision %q", options.Revision)
++	k8sRawWatch, err := c.clientSet.NetworkingV1().NetworkPolicies("").Watch(ctx, k8sOpts)
+ 	if err != nil {
+ 		return nil, K8sErrorToCalico(err, list)
+ 	}
+diff --git a/libcalico-go/lib/backend/k8s/resources/node.go b/libcalico-go/lib/backend/k8s/resources/node.go
+index cbdf4f6..3c8b57d 100644
+--- a/libcalico-go/lib/backend/k8s/resources/node.go
++++ b/libcalico-go/lib/backend/k8s/resources/node.go
+@@ -184,20 +184,20 @@ func (c *nodeClient) EnsureInitialized() error {
+ 	return nil
+ }
+ 
+-func (c *nodeClient) Watch(ctx context.Context, list model.ListInterface, revision string) (api.WatchInterface, error) {
++func (c *nodeClient) Watch(ctx context.Context, list model.ListInterface, options api.WatchOptions) (api.WatchInterface, error) {
+ 	// Build watch options to pass to k8s.
+-	opts := metav1.ListOptions{ResourceVersion: revision, Watch: true, AllowWatchBookmarks: false}
+ 	rlo, ok := list.(model.ResourceListOptions)
+ 	if !ok {
+ 		return nil, fmt.Errorf("ListInterface is not a ResourceListOptions: %s", list)
+ 	}
++	k8sOpts := watchOptionsToK8sListOptions(options)
+ 	if len(rlo.Name) != 0 {
+ 		// We've been asked to watch a specific node resource.
+ 		log.WithField("name", rlo.Name).Debug("Watching a single node")
+-		opts.FieldSelector = fields.OneTermEqualSelector("metadata.name", rlo.Name).String()
++		k8sOpts.FieldSelector = fields.OneTermEqualSelector("metadata.name", rlo.Name).String()
+ 	}
+ 
+-	k8sWatch, err := c.clientSet.CoreV1().Nodes().Watch(ctx, opts)
++	k8sWatch, err := c.clientSet.CoreV1().Nodes().Watch(ctx, k8sOpts)
+ 	if err != nil {
+ 		return nil, K8sErrorToCalico(err, list)
+ 	}
+diff --git a/libcalico-go/lib/backend/k8s/resources/profile.go b/libcalico-go/lib/backend/k8s/resources/profile.go
+index 68e8421..2df1691 100644
+--- a/libcalico-go/lib/backend/k8s/resources/profile.go
++++ b/libcalico-go/lib/backend/k8s/resources/profile.go
+@@ -233,9 +233,8 @@ func (c *profileClient) EnsureInitialized() error {
+ 	return nil
+ }
+ 
+-func (c *profileClient) Watch(ctx context.Context, list model.ListInterface, revision string) (api.WatchInterface, error) {
++func (c *profileClient) Watch(ctx context.Context, list model.ListInterface, options api.WatchOptions) (api.WatchInterface, error) {
+ 	// Build watch options to pass to k8s.
+-	opts := metav1.ListOptions{Watch: true, AllowWatchBookmarks: false}
+ 	rlo, ok := list.(model.ResourceListOptions)
+ 	if !ok {
+ 		return nil, fmt.Errorf("ListInterface is not a ResourceListOptions: %s", list)
+@@ -247,6 +246,7 @@ func (c *profileClient) Watch(ctx context.Context, list model.ListInterface, rev
+ 	sa := ""
+ 
+ 	// Watch a specific profile.
++	k8sOpts := watchOptionsToK8sListOptions(options)
+ 	if len(rlo.Name) != 0 {
+ 		log.WithField("name", rlo.Name).Debug("Watching a single profile")
+ 		var err error
+@@ -256,7 +256,7 @@ func (c *profileClient) Watch(ctx context.Context, list model.ListInterface, rev
+ 		// of real ns and sa watchers. This profile watcher will never get any
+ 		// events because no events will occur for the static default-allow profile.
+ 		if rlo.Name == resources.DefaultAllowProfileName {
+-			log.WithField("rv", revision).Debug("Creating a fake watch on default-allow profile")
++			log.WithField("rv", options.Revision).Debug("Creating a fake watch on default-allow profile")
+ 			return newProfileWatcher(ctx, api.NewFake(), api.NewFake()), nil
+ 		} else if strings.HasPrefix(rlo.Name, conversion.NamespaceProfileNamePrefix) {
+ 			watchSA = false
+@@ -264,28 +264,28 @@ func (c *profileClient) Watch(ctx context.Context, list model.ListInterface, rev
+ 			if err != nil {
+ 				return nil, err
+ 			}
+-			opts.FieldSelector = fields.OneTermEqualSelector("metadata.name", ns).String()
++			k8sOpts.FieldSelector = fields.OneTermEqualSelector("metadata.name", ns).String()
+ 		} else if strings.HasPrefix(rlo.Name, conversion.ServiceAccountProfileNamePrefix) {
+ 			watchNS = false
+ 			ns, sa, err = c.ProfileNameToServiceAccount(rlo.Name)
+ 			if err != nil {
+ 				return nil, err
+ 			}
+-			opts.FieldSelector = fields.OneTermEqualSelector("metadata.name", sa).String()
++			k8sOpts.FieldSelector = fields.OneTermEqualSelector("metadata.name", sa).String()
+ 		} else {
+ 			return nil, fmt.Errorf("Unsupported prefix for resource name: %s", rlo.Name)
+ 		}
+ 	}
+-	nsRev, saRev, err := c.SplitProfileRevision(revision)
++	nsRev, saRev, err := c.SplitProfileRevision(options.Revision)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 
+-	opts.ResourceVersion = nsRev
++	k8sOpts.ResourceVersion = nsRev
+ 	var nsWatch kwatch.Interface = kwatch.NewFake()
+ 	if watchNS {
+ 		log.Debugf("Watching namespace at revision %q", nsRev)
+-		nsWatch, err = c.clientSet.CoreV1().Namespaces().Watch(ctx, opts)
++		nsWatch, err = c.clientSet.CoreV1().Namespaces().Watch(ctx, k8sOpts)
+ 		if err != nil {
+ 			return nil, K8sErrorToCalico(err, list)
+ 		}
+@@ -300,11 +300,11 @@ func (c *profileClient) Watch(ctx context.Context, list model.ListInterface, rev
+ 	nsWatcher := newK8sWatcherConverter(ctx, "Profile-NS", converter, nsWatch)
+ 
+ 	// Watch all service accounts in relevant namespace(s)
+-	opts.ResourceVersion = saRev
++	k8sOpts.ResourceVersion = saRev
+ 	var saWatch kwatch.Interface = kwatch.NewFake()
+ 	if watchSA {
+ 		log.Debugf("Watching serviceAccount at revision %q", saRev)
+-		saWatch, err = c.clientSet.CoreV1().ServiceAccounts(ns).Watch(ctx, opts)
++		saWatch, err = c.clientSet.CoreV1().ServiceAccounts(ns).Watch(ctx, k8sOpts)
+ 		if err != nil {
+ 			nsWatch.Stop()
+ 			return nil, K8sErrorToCalico(err, list)
+diff --git a/libcalico-go/lib/backend/k8s/resources/resources.go b/libcalico-go/lib/backend/k8s/resources/resources.go
+index 9ca8ef3..66007f7 100644
+--- a/libcalico-go/lib/backend/k8s/resources/resources.go
++++ b/libcalico-go/lib/backend/k8s/resources/resources.go
+@@ -21,6 +21,7 @@ import (
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	"k8s.io/apimachinery/pkg/runtime"
+ 
++	"github.com/projectcalico/calico/libcalico-go/lib/backend/api"
+ 	"github.com/projectcalico/calico/libcalico-go/lib/backend/model"
+ )
+ 
+@@ -217,3 +218,10 @@ func ConvertK8sResourceToCalicoResource(res Resource) error {
+ 
+ 	return nil
+ }
++
++func watchOptionsToK8sListOptions(wo api.WatchOptions) metav1.ListOptions {
++	return metav1.ListOptions{
++		ResourceVersion: wo.Revision,
++		Watch:           true,
++	}
++}
+diff --git a/libcalico-go/lib/backend/k8s/resources/workloadendpoint.go b/libcalico-go/lib/backend/k8s/resources/workloadendpoint.go
+index 2f82b17..e35b344 100644
+--- a/libcalico-go/lib/backend/k8s/resources/workloadendpoint.go
++++ b/libcalico-go/lib/backend/k8s/resources/workloadendpoint.go
+@@ -338,13 +338,13 @@ func (c *WorkloadEndpointClient) EnsureInitialized() error {
+ 	return nil
+ }
+ 
+-func (c *WorkloadEndpointClient) Watch(ctx context.Context, list model.ListInterface, revision string) (api.WatchInterface, error) {
++func (c *WorkloadEndpointClient) Watch(ctx context.Context, list model.ListInterface, options api.WatchOptions) (api.WatchInterface, error) {
+ 	// Build watch options to pass to k8s.
+-	opts := metav1.ListOptions{ResourceVersion: revision, Watch: true, AllowWatchBookmarks: false}
+ 	rlo, ok := list.(model.ResourceListOptions)
+ 	if !ok {
+ 		return nil, fmt.Errorf("ListInterface is not a ResourceListOptions: %s", list)
+ 	}
++	k8sOpts := watchOptionsToK8sListOptions(options)
+ 	if len(rlo.Name) != 0 {
+ 		if len(rlo.Namespace) == 0 {
+ 			return nil, errors.New("cannot watch a specific WorkloadEndpoint without a namespace")
+@@ -355,11 +355,11 @@ func (c *WorkloadEndpointClient) Watch(ctx context.Context, list model.ListInter
+ 			return nil, err
+ 		}
+ 		log.WithField("name", wepids.Pod).Debug("Watching a single workloadendpoint")
+-		opts.FieldSelector = fields.OneTermEqualSelector("metadata.name", wepids.Pod).String()
++		k8sOpts.FieldSelector = fields.OneTermEqualSelector("metadata.name", wepids.Pod).String()
+ 	}
+ 
+ 	ns := rlo.Namespace
+-	k8sWatch, err := c.clientSet.CoreV1().Pods(ns).Watch(ctx, opts)
++	k8sWatch, err := c.clientSet.CoreV1().Pods(ns).Watch(ctx, k8sOpts)
+ 	if err != nil {
+ 		return nil, K8sErrorToCalico(err, list)
+ 	}
+diff --git a/libcalico-go/lib/backend/k8s/resources/workloadendpoint_test.go b/libcalico-go/lib/backend/k8s/resources/workloadendpoint_test.go
+index c7b32e9..bf94a35 100644
+--- a/libcalico-go/lib/backend/k8s/resources/workloadendpoint_test.go
++++ b/libcalico-go/lib/backend/k8s/resources/workloadendpoint_test.go
+@@ -34,6 +34,7 @@ import (
+ 	apiv3 "github.com/projectcalico/api/pkg/apis/projectcalico/v3"
+ 
+ 	libapiv3 "github.com/projectcalico/calico/libcalico-go/lib/apis/v3"
++	"github.com/projectcalico/calico/libcalico-go/lib/backend/api"
+ 	"github.com/projectcalico/calico/libcalico-go/lib/backend/model"
+ 	"github.com/projectcalico/calico/libcalico-go/lib/names"
+ 
+@@ -774,7 +775,7 @@ func testWatchWorkloadEndpoints(pods []*k8sapi.Pod, expectedWEPs []*libapiv3.Wor
+ 	ctx := context.Background()
+ 
+ 	wepClient := resources.NewWorkloadEndpointClient(k8sClient).(*resources.WorkloadEndpointClient)
+-	wepWatcher, err := wepClient.Watch(context.Background(), model.ResourceListOptions{}, "")
++	wepWatcher, err := wepClient.Watch(context.Background(), model.ResourceListOptions{}, api.WatchOptions{})
+ 
+ 	Expect(err).ShouldNot(HaveOccurred())
+ 
+diff --git a/libcalico-go/lib/backend/watchersyncer/watchercache.go b/libcalico-go/lib/backend/watchersyncer/watchercache.go
+index 8d3edc5..f24bf27 100644
+--- a/libcalico-go/lib/backend/watchersyncer/watchercache.go
++++ b/libcalico-go/lib/backend/watchersyncer/watchercache.go
+@@ -226,7 +226,9 @@ func (wc *watcherCache) resyncAndCreateWatcher(ctx context.Context) {
+ 
+ 		// And now start watching from the revision returned by the List, or from a previous watch event
+ 		// (depending on whether we were performing a full resync).
+-		w, err := wc.client.Watch(ctx, wc.resourceType.ListInterface, wc.currentWatchRevision)
++		w, err := wc.client.Watch(ctx, wc.resourceType.ListInterface, api.WatchOptions{
++			Revision: wc.currentWatchRevision,
++		})
+ 		if err != nil {
+ 			// Failed to create the watcher - we'll need to retry.
+ 			switch err.(type) {
+diff --git a/libcalico-go/lib/backend/watchersyncer/watchersyncer_test.go b/libcalico-go/lib/backend/watchersyncer/watchersyncer_test.go
+index c080d82..a5db3b7 100644
+--- a/libcalico-go/lib/backend/watchersyncer/watchersyncer_test.go
++++ b/libcalico-go/lib/backend/watchersyncer/watchersyncer_test.go
+@@ -1068,14 +1068,14 @@ func (c *fakeClient) List(ctx context.Context, list model.ListInterface, revisio
+ 	}
+ }
+ 
+-func (c *fakeClient) Watch(ctx context.Context, list model.ListInterface, revision string) (api.WatchInterface, error) {
++func (c *fakeClient) Watch(ctx context.Context, list model.ListInterface, options api.WatchOptions) (api.WatchInterface, error) {
+ 	// Create a fake watcher keyed off the ListOptions (root path).
+ 	name := model.ListOptionsToDefaultPathRoot(list)
+ 	log.WithField("Name", name).Info("Watch request")
+ 	if l, ok := c.lws[name]; !ok || l == nil {
+ 		panic("Watch for unhandled resource type")
+ 	} else {
+-		c.latestWatchRevision = revision
++		c.latestWatchRevision = options.Revision
+ 		return l.watch()
+ 	}
+ }
+diff --git a/libcalico-go/lib/clientv3/resources.go b/libcalico-go/lib/clientv3/resources.go
+index 1b59ddf..2a495e6 100644
+--- a/libcalico-go/lib/clientv3/resources.go
++++ b/libcalico-go/lib/clientv3/resources.go
+@@ -251,7 +251,7 @@ func (c *resources) Watch(ctx context.Context, opts options.ListOptions, kind st
+ 
+ 	// Create the backend watcher.  We need to process the results to add revision data etc.
+ 	ctx, cancel := context.WithCancel(ctx)
+-	backend, err := c.backend.Watch(ctx, list, opts.ResourceVersion)
++	backend, err := c.backend.Watch(ctx, list, bapi.WatchOptions{Revision: opts.ResourceVersion})
+ 	if err != nil {
+ 		cancel()
+ 		return nil, err
+diff --git a/libcalico-go/lib/ipam/ipam_block_reader_writer_test.go b/libcalico-go/lib/ipam/ipam_block_reader_writer_test.go
+index a219fa7..9bfb63d 100644
+--- a/libcalico-go/lib/ipam/ipam_block_reader_writer_test.go
++++ b/libcalico-go/lib/ipam/ipam_block_reader_writer_test.go
+@@ -142,7 +142,7 @@ func (c *fakeClient) List(ctx context.Context, list model.ListInterface, revisio
+ 	return nil, nil
+ }
+ 
+-func (c *fakeClient) Watch(ctx context.Context, list model.ListInterface, revision string) (api.WatchInterface, error) {
++func (c *fakeClient) Watch(ctx context.Context, list model.ListInterface, options api.WatchOptions) (api.WatchInterface, error) {
+ 	panic("should not be called")
+ 	return nil, nil
+ }
+-- 
+2.54.0 (Apple Git-157)
+
+

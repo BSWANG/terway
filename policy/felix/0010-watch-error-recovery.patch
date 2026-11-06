@@ -1,0 +1,168 @@
+From 9d9aa480480755206e3be7c22170876a67b2260c Mon Sep 17 00:00:00 2001
+From: "bingshen.wbs" <bingshen.wbs@alibaba-inc.com>
+Date: Fri, 6 Nov 2026 16:55:21 +0800
+Subject: [PATCH] fix: preserve watch revision on connection failures
+
+Upstream-commit: 508aedb9f343a7f3ae5f4dbb4cd9c66ab10de112
+---
+ .../lib/backend/k8s/resources/profile.go      |  2 +-
+ .../lib/backend/watchersyncer/watchercache.go | 38 +++++++++++++------
+ libcalico-go/lib/errors/errors.go             | 20 ++++++++++
+ 3 files changed, 48 insertions(+), 12 deletions(-)
+
+diff --git a/libcalico-go/lib/backend/k8s/resources/profile.go b/libcalico-go/lib/backend/k8s/resources/profile.go
+index 4e4b75a..0d197f1 100644
+--- a/libcalico-go/lib/backend/k8s/resources/profile.go
++++ b/libcalico-go/lib/backend/k8s/resources/profile.go
+@@ -451,7 +451,7 @@ func (pw *profileWatcher) processProfileEvents() {
+ 				}
+ 				oma.GetObjectMeta().SetResourceVersion(pw.JoinProfileRevisions(pw.k8sNSRev, pw.k8sSARev))
+ 			}
+-		} else if e.Error == nil {
++		} else if e.Error == nil && e.Type != api.WatchBookmark {
+ 			log.WithField("event", e).Warning("Event without error or value")
+ 		}
+ 
+diff --git a/libcalico-go/lib/backend/watchersyncer/watchercache.go b/libcalico-go/lib/backend/watchersyncer/watchercache.go
+index 78df067..06df04b 100644
+--- a/libcalico-go/lib/backend/watchersyncer/watchercache.go
++++ b/libcalico-go/lib/backend/watchersyncer/watchercache.go
+@@ -16,10 +16,12 @@ package watchersyncer
+ 
+ import (
+ 	"context"
++	"errors"
++	"syscall"
+ 	"time"
+ 
+ 	"github.com/sirupsen/logrus"
+-	"k8s.io/apimachinery/pkg/api/errors"
++	kerrors "k8s.io/apimachinery/pkg/api/errors"
+ 
+ 	"github.com/projectcalico/calico/libcalico-go/lib/backend/api"
+ 	"github.com/projectcalico/calico/libcalico-go/lib/backend/model"
+@@ -131,12 +133,19 @@ mainLoop:
+ 				// of WatchError are treated equally,log the Error and trigger a full resync. We only log at info
+ 				// because errors may occur due to compaction causing revisions to no longer be valid - in this case
+ 				// we simply need to do a full resync.
+-				wc.logger.WithError(event.Error).Info("Watch error event received, restarting the watch.")
+-				wc.errorCountAtCurrentRev++
+-				if wc.errorCountAtCurrentRev > maxErrorsPerRevision {
+-					// Too many errors at the current revision, trigger a full resync.
+-					wc.logger.Warn("Too many errors at current revision, triggering full resync")
++				if kerrors.IsResourceExpired(event.Error) {
++					// Our current watch revision is too old.  We hit this path after the API server restarts
++					// (and presumably does an immediate compaction).
++					wc.logger.WithError(event.Error).Info("Watch has expired, triggering full resync.")
+ 					wc.resetWatchRevisionForFullResync()
++				} else {
++					wc.logger.WithError(event.Error).Warn("Unknown watch error event received, restarting the watch.")
++					wc.errorCountAtCurrentRev++
++					if wc.errorCountAtCurrentRev > maxErrorsPerRevision {
++						// Too many errors at the current revision, trigger a full resync.
++						wc.logger.Warn("Too many errors at current revision, triggering full resync")
++						wc.resetWatchRevisionForFullResync()
++					}
+ 				}
+ 				wc.resyncAndCreateWatcher(ctx)
+ 			default:
+@@ -207,7 +216,7 @@ func (wc *watcherCache) resyncAndCreateWatcher(ctx context.Context) {
+ 			if err != nil {
+ 				// Failed to perform the list.  Pause briefly (so we don't tight loop) and retry.
+ 				wc.logger.WithError(err).Info("Failed to perform list of current data during resync")
+-				if errors.IsResourceExpired(err) {
++				if kerrors.IsResourceExpired(err) {
+ 					// Our current watch revision is too old. Start again without a revision.
+ 					wc.logger.Info("Clearing cached watch revision for next List call")
+ 					wc.resetWatchRevisionForFullResync()
+@@ -247,16 +256,23 @@ func (wc *watcherCache) resyncAndCreateWatcher(ctx context.Context) {
+ 			AllowWatchBookmarks: true,
+ 		})
+ 		if err != nil {
+-			if errors.IsResourceExpired(err) {
++			if kerrors.IsResourceExpired(err) {
+ 				// Our current watch revision is too old. Start again without a revision.
+ 				wc.logger.Info("Watch has expired, queueing full resync.")
+ 				wc.resetWatchRevisionForFullResync()
+ 				continue
+ 			}
+ 
+-			// Failed to create the watcher - we'll need to retry.
+-			switch err.(type) {
+-			case cerrors.ErrorOperationNotSupported, cerrors.ErrorResourceDoesNotExist:
++			if errors.Is(err, syscall.ECONNREFUSED) {
++				// Server is down, retry after a short delay.  We don't want to
++				// reset the watch revision since the server is down; it's not our
++				// fault.
++				wc.logger.WithError(err).Warn("API server refused connection, will retry.")
++				continue
++			}
++
++			if errors.Is(err, cerrors.ErrorOperationNotSupported{}) ||
++				errors.Is(err, cerrors.ErrorResourceDoesNotExist{}) {
+ 				// Watch is not supported on this resource type, either because the type fundamentally
+ 				// doesn't support it, or because there are no resources to watch yet (and Kubernetes won't
+ 				// let us watch if there are no resources yet). Pause for the watch poll interval.
+diff --git a/libcalico-go/lib/errors/errors.go b/libcalico-go/lib/errors/errors.go
+index 164d71b..bcfb609 100644
+--- a/libcalico-go/lib/errors/errors.go
++++ b/libcalico-go/lib/errors/errors.go
+@@ -29,6 +29,10 @@ type ErrorDatastoreError struct {
+ 	Identifier interface{}
+ }
+ 
++func (e ErrorDatastoreError) Unwrap() error {
++	return e.Err
++}
++
+ func (e ErrorDatastoreError) Error() string {
+ 	return e.Err.Error()
+ }
+@@ -61,6 +65,10 @@ func (e ErrorResourceDoesNotExist) Error() string {
+ 	return fmt.Sprintf("resource does not exist: %v with error: %v", e.Identifier, e.Err)
+ }
+ 
++func (e ErrorResourceDoesNotExist) Unwrap() error {
++	return e.Err
++}
++
+ // Error indicating an operation is not supported.
+ type ErrorOperationNotSupported struct {
+ 	Operation  string
+@@ -83,6 +91,10 @@ type ErrorResourceAlreadyExists struct {
+ 	Identifier interface{}
+ }
+ 
++func (e ErrorResourceAlreadyExists) Unwrap() error {
++	return e.Err
++}
++
+ func (e ErrorResourceAlreadyExists) Error() string {
+ 	return fmt.Sprintf("resource already exists: %v", e.Identifier)
+ }
+@@ -92,6 +104,10 @@ type ErrorConnectionUnauthorized struct {
+ 	Err error
+ }
+ 
++func (e ErrorConnectionUnauthorized) Unwrap() error {
++	return e.Err
++}
++
+ func (e ErrorConnectionUnauthorized) Error() string {
+ 	return fmt.Sprintf("connection is unauthorized: %v", e.Err)
+ }
+@@ -151,6 +167,10 @@ type ErrorResourceUpdateConflict struct {
+ 	Identifier interface{}
+ }
+ 
++func (e ErrorResourceUpdateConflict) Unwrap() error {
++	return e.Err
++}
++
+ func (e ErrorResourceUpdateConflict) Error() string {
+ 	return fmt.Sprintf("update conflict: %v", e.Identifier)
+ }
+-- 
+2.54.0 (Apple Git-157)
+
+
